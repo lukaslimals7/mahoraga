@@ -35,12 +35,17 @@ s._paint_wheel()
 s._paint_pane()
 sys.stdout = old
 
+assert cap.buf.startswith("\033[s"), "paint must SAVE the cursor first"
+assert cap.buf.rstrip().endswith("\033[u"), "paint must RESTORE the cursor last"
 segs = re.split(r"\x1b\[\d+;\d+H", cap.buf)[1:]
 assert segs, "nothing painted!"
 for seg in segs:
-    body = seg.replace("\033[K", "")
+    core = seg
+    while core.endswith("\033[u") or core.endswith("\033[s"):   # drop cursor markers
+        core = core[:-3]
+    body = core.replace("\033[K", "")
     assert vis_len(body) <= s.cols - 1, f"row overflow: {vis_len(body)} > {s.cols-1}"
-    assert seg.endswith("\033[K"), "row not cleared to EOL"
+    assert core.endswith("\033[K"), "row not cleared to EOL"
 print(f"paint segments: {len(segs)} rows, all fit + cleared: OK")
 
 # 4) full app boots and exits cleanly on EOF

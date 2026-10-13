@@ -17,6 +17,24 @@ from ..memory import sqlite as mem
 
 CONFIG_PATH = pathlib.Path.home() / ".mahoraga" / "config.json"
 
+
+def _load_env_files():
+    """Load KEY=VALUE lines from ~/.mahoraga/.env and ./.env (never overrides
+    an already-exported var). This is how API keys reach the providers."""
+    for p in (CONFIG_PATH.parent / ".env", pathlib.Path.cwd() / ".env"):
+        try:
+            if not p.is_file():
+                continue
+            for line in p.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip().strip('"').strip("'"),
+                                      v.strip().strip('"').strip("'"))
+        except OSError:
+            pass
+
 DEFAULT_SYSTEM = (
     "You are Mahoraga, a minimal local agent with tools.\n"
     "TOOL DISCIPLINE: use a tool ONLY when the user asks you to do, run, find, "
@@ -47,6 +65,7 @@ DEFAULT_PROVIDERS = {
 
 class Mahoraga:
     def __init__(self, yolo: bool = False, config_path: str | None = None):
+        _load_env_files()
         self.yolo = yolo
         self.cfg_path = pathlib.Path(config_path).expanduser() if config_path else CONFIG_PATH
         self.cfg = self._load_config()

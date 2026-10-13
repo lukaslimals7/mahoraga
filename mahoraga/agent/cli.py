@@ -86,7 +86,7 @@ class Screen:
     # ---- painting ----
 
     def _paint_wheel(self):
-        out = []
+        out = ["\033[s"]          # save cursor: painting must never steal it
         if self.compact:
             glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
             g = glyphs[self._frame % len(glyphs)]
@@ -101,6 +101,7 @@ class Screen:
             for i in range(len(lines), self.wheel_h - 1):
                 out.append(_at(1 + i) + "\033[K")
             out.append(_at(self.wheel_h) + f" {GOLD}● {self.status}{R0}\033[K")
+        out.append("\033[u")      # restore cursor to wherever the user is typing
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -116,7 +117,7 @@ class Screen:
 
     def _paint_pane(self):
         lines = self._wrapped()[-self.pane_h:]
-        out = []
+        out = ["\033[s"]
         for i in range(self.pane_h):
             row = self.pane_top + i
             if i < len(lines):
@@ -124,6 +125,7 @@ class Screen:
                 out.append(_at(row) + f"{color}{text}{R0}\033[K")
             else:
                 out.append(_at(row) + "\033[K")
+        out.append("\033[u")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -164,10 +166,15 @@ class Screen:
         sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
         try:
-            return input()
+            line = input()
         finally:
             sys.stdout.write(HIDE_CURSOR)
             sys.stdout.flush()
+        # Enter at the bottom row scrolls the terminal up one line — repaint
+        # every region at absolute positions so the layout self-heals instantly.
+        self._paint_wheel()
+        self._paint_pane()
+        return line
 
     def kick(self):
         self._dirty.set()

@@ -12,6 +12,17 @@ class LLMError(Exception):
     """A readable provider failure — the server's message, not a traceback."""
 
 
+def _sanitize_schema(obj):
+    """Drop `additionalProperties` recursively: DeepSeek 400s on it; OpenAI
+    tolerates its absence just fine."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_schema(v)
+                for k, v in obj.items() if k != "additionalProperties"}
+    if isinstance(obj, list):
+        return [_sanitize_schema(v) for v in obj]
+    return obj
+
+
 class OpenAICompat(LLMProvider):
     name = "openai_compat"
 
@@ -71,7 +82,7 @@ class OpenAICompat(LLMProvider):
             "stream": bool(stream and on_delta),
         }
         if tools:
-            body["tools"] = tools
+            body["tools"] = _sanitize_schema(tools)
 
         if not body["stream"]:
             with self._request("/chat/completions", body) as resp:
