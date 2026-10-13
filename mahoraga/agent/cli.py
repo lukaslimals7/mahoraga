@@ -20,7 +20,7 @@ import sys, threading, time, json, re, shutil
 from ..core.runtime import Mahoraga
 from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
 from ..policy import approval
-from .lineedit import LineEditor, complete
+from .lineedit import LineEditor, complete, set_raw, restore
 
 BOLD = "\033[1m"; DIM = "\033[2m"; CYAN = "\033[36m"; GOLD = "\033[33m"
 GREEN = "\033[32m"; RED = "\033[31m"; R0 = "\033[0m"
@@ -70,17 +70,27 @@ class Screen:
         self._dirty = threading.Event()
         self._wheel_stop = threading.Event()
         self._frame = 0
+        self._saved_tty = None
+        self.busy = False               # True while the model works
         self.status = "ready"
 
     # ---- lifecycle ----
 
     def enter(self):
-        sys.stdout.write(ALT_ON + NOWRAP + HIDE_CURSOR)
+        # alt screen + no autowrap + NO mouse/alt-scroll reporting (mouse wheel
+        # was injecting arrow-key bytes) + tty raw for the app's whole life
+        sys.stdout.write(ALT_ON + NOWRAP + HIDE_CURSOR
+                         + "\033[?1000l\033[?1002l\033[?1003l\033[?1015l"
+                         + "\033[?1006l\033[?1007l")
         sys.stdout.flush()
+        if sys.stdin.isatty():
+            self._saved_tty = set_raw(sys.stdin.fileno())
         threading.Thread(target=self._loop, daemon=True).start()
 
     def leave(self):
         self._wheel_stop.set()
+        if self._saved_tty is not None:
+            restore(sys.stdin.fileno(), self._saved_tty)
         sys.stdout.write(R0 + SHOW_CURSOR + WRAP_ON + ALT_OFF + RESET)
         sys.stdout.flush()
 
@@ -130,6 +140,15 @@ class Screen:
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
+    def _paint_busy(self):
+        """Prompt row while the model works: spinner + state + how to stop."""
+        glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        g = glyphs[self._frame % len(glyphs)]
+        sys.stdout.write("\033[s" + _at(self.rows)
+                         + f" {GOLD}{g}{R0} {self.status}"
+                         + f"  {DIM}(Ctrl+C to stop){R0}\033[K\033[u")
+        sys.stdout.flush()
+
     def _loop(self):
         """Owns the top region always; repaints the pane when dirty."""
         while not self._wheel_stop.is_set():
@@ -138,6 +157,8 @@ class Screen:
             if self._dirty.is_set():
                 self._dirty.clear()
                 self._paint_pane()
+            if self.busy:
+                self._paint_busy()
             time.sleep(0.08)
 
     # ---- buffer API (main thread) ----
@@ -263,16 +284,27 @@ def cli():
             screen.status = "thinking…"
             screen.stream_piece(piece, DIM, "think")
 
+        screen.busy = True
         try:
             answer = agent.send(text, on_delta=on_delta, on_reason=on_reason,
                                 on_tool=on_tool)
+        except KeyboardInterrupt:
+            screen.busy = False
+            screen.status = "stopped"
+            screen.finish_stream()
+            screen.say(f"{DIM}⏹ stopped — kept whatever streamed so far{R0}")
+            screen.say("")
+            screen.kick()
+            return
         except Exception as e:
+            screen.busy = False
             screen.status = "ready"
             screen.finish_stream()
             screen.say(f"{RED}✗ {e}{R0}")
             screen.say("")
             screen.kick()
             return
+        screen.busy = False
         screen.status = "ready"
         screen.finish_stream()
         if not answer:
@@ -285,7 +317,12 @@ def cli():
             line = screen.input_line(f"{GOLD}❯ {R0}", history=history,
                                      completer=completer,
                                      on_options=on_options).strip()
-        except (EOFError, KeyboardInterrupt):
+        except KeyboardInterrupt:
+            # ^C at the prompt: cancel the line, never the session
+            screen.say(f"{DIM}^C{R0}")
+            screen.kick()
+            continue
+        except EOFError:
             screen.leave()
             print("bye.")
             break
@@ -311,10 +348,13 @@ def cli():
                           "/provider        list providers", "/provider <n>    switch provider",
                           "/model           list models", "/model <name>    switch model",
                           "/tools           list tools", "/tools off|on    disable/enable tools",
+                          "/cd <path>       change the shell working dir (persists)",
+                          "/pwd             where the shell runs",
                           "/memory          recent stored messages",
                           "/clear           wipe stored memory"]:
                     screen.say(f"  {h}")
-                screen.say(f"{DIM}yolo: python -m mahoraga --yolo{R0}")
+                screen.say(f"{DIM}Ctrl+C stops a reply · ^C at prompt clears the line · "
+                           f"yolo: python -m mahoraga --yolo{R0}")
             elif cmd == "/new":
                 agent.new_session()
                 screen.say(f"{DIM}context cleared{R0}")
@@ -351,10 +391,19 @@ def cli():
                     for name in sorted(agent.registry.tools):
                         screen.say(f"  {CYAN}•{R0} {name}")
                     screen.say(f"{DIM}tools are {'on' if agent.tools_enabled else 'off'} — /tools off|on{R0}")
+            elif cmd == "/cd":
+                from ..plugins import set_shell_cwd, shell_cwd
+                try:
+                    screen.say(f"{DIM}shell cwd -> {set_shell_cwd(arg) if arg else shell_cwd()}{R0}")
+                except (NotADirectoryError, FileNotFoundError):
+                    screen.say(f"{RED}not a directory: {arg}{R0}")
+            elif cmd == "/pwd":
+                from ..plugins import shell_cwd
+                screen.say(f"{DIM}shell cwd: {shell_cwd()}{R0}")
             elif cmd == "/memory":
                 from ..memory import sqlite as mem
                 for role, content in mem.load_recent(10):
-                    tag = f"{GOLD}you{R0}" if role == "user" else f"{CYAN}mira{R0}"
+                    tag = f"{GOLD}you{R0}" if role == "user" else f"{CYAN}mahoraga{R0}"
                     screen.say(f"{tag}: {content[:90]}")
             elif cmd == "/clear":
                 from ..memory import sqlite as mem

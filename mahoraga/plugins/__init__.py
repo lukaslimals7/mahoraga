@@ -2,6 +2,23 @@
 from __future__ import annotations
 import os, json, re, subprocess, urllib.request
 
+# persistent shell working directory (survives across tool calls; /cd in the
+# TUI updates it too). Subprocesses can't cd the parent — so every command
+# runs inside `cd <cwd> && ...` and a bare `cd <path>` moves the anchor.
+SHELL_STATE = {"cwd": os.path.expanduser("~")}
+
+
+def shell_cwd() -> str:
+    return SHELL_STATE["cwd"]
+
+
+def set_shell_cwd(path: str) -> str:
+    p = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(p):
+        raise NotADirectoryError(p)
+    SHELL_STATE["cwd"] = p
+    return p
+
 def register_all(reg, data_dir: str = "~/.mahoraga"):
     d = os.path.expanduser(data_dir)
     os.makedirs(d, exist_ok=True)
@@ -64,9 +81,21 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
         list_dir)
 
     def shell(command: str, timeout: int = 60) -> str:
+        cmd = command.strip()
+        # a bare `cd <path>` (no chaining) moves the persistent anchor
+        m = re.fullmatch(r"cd\s+(.+)", cmd)
+        if m and "&&" not in cmd and ";" not in cmd and "|" not in cmd:
+            try:
+                return f"cwd -> {set_shell_cwd(m.group(1).strip().strip(chr(39)).strip(chr(34)))}"
+            except NotADirectoryError as e:
+                return json.dumps({"error": f"not a directory: {e}"})
+        if cmd == "cd" or cmd == "pwd":
+            return SHELL_STATE["cwd"]
         try:
-            r = subprocess.run(command, shell=True, capture_output=True,
-                               text=True, timeout=timeout)
+            # run inside the persistent cwd; chained `cd x && y` works in-call
+            r = subprocess.run(cmd, shell=True, capture_output=True,
+                               text=True, timeout=timeout,
+                               cwd=SHELL_STATE["cwd"])
             out = (r.stdout + r.stderr).rstrip()
             tail = f"\n[exit {r.returncode}]" if r.returncode else ""
             return (out[:8000] + tail) if out else f"(no output, exit={r.returncode})"

@@ -175,6 +175,23 @@ def complete(buf: str, cur: int, pool: list[str], word_start: int
     return new_buf, word_start + len(common), matches
 
 
+def set_raw(fd: int) -> list:
+    """Switch the tty to cbreak+noecho for the WHOLE app lifetime and keep the
+    saved attrs for restore(). Echo is the app's job (we paint the prompt row);
+    leaving the tty in echo mode is what made wheel/arrow bytes print as raw
+    ^[[A garbage while the model was generating."""
+    saved = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    attrs = termios.tcgetattr(fd)
+    attrs[3] &= ~termios.ECHO                       # lflag: no echo, keep ISIG
+    termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+    return saved
+
+
+def restore(fd: int, saved: list):
+    termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
 class LineEditor:
     """Owns the bottom-row prompt while reading a line: cbreak mode, self-echo,
     history via UP/DOWN, completion via TAB (through a completer callback).
@@ -191,19 +208,14 @@ class LineEditor:
         self.on_options = on_options
 
     def read(self, prompt: str) -> str:
-        """Edit one line. Restores tty state before returning/raising."""
+        """Edit one line. Tty is expected in cbreak+noecho (set_raw by the app).
+        Ctrl+C clears the line and keeps the session alive; Ctrl+D / /quit exit."""
         stdin = sys.stdin
         if not stdin.isatty():
             # non-tty (tests, pipes): fall back to plain input
             return input(prompt)
-        fd = stdin.fileno()
-        saved = termios.tcgetattr(fd)
-        tty.setcbreak(fd)             # no echo, no line buffering; ISIG stays
-        try:
-            self._loop(fd, prompt)
-            return self.state.buf
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        self._loop(stdin.fileno(), prompt)
+        return self.state.buf
 
     def _loop(self, fd: int, prompt: str):
         st = self.state
@@ -250,7 +262,10 @@ class LineEditor:
             elif action == WORD_BACK:
                 st.word_back()
             elif action == INTERRUPT:
-                raise KeyboardInterrupt
+                st.buf, st.cur = "", 0        # ^C: cancel the line, keep going
+                st._hist_idx = None
+                self.redraw(prompt, st.buf, st.cur)
+                continue
             elif action == EOF:
                 if not st.buf:
                     raise EOFError
