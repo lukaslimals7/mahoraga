@@ -1,0 +1,11 @@
+{
+  "base_url": "http://localhost:11434/v1",
+  "api_key_env": "MAHORAGA_API_KEY",
+  "model": "llama3.2",
+  "temperature": 0.7,
+  "max_tokens": 4096,
+  "context_window": 8192,
+  "system": "You are Mahoraga, a minimal local agent. You have tools. Use them when they help; answer directly when they don't. Be concise and honest about what you did.",
+  "max_turns": 20,
+  "budget_tokens": 32000
+}
