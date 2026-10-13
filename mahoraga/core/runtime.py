@@ -51,10 +51,10 @@ DEFAULT_PROVIDERS = {
         "api_key_env": "",
     },
     "deepseek": {
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-pro",
         "api_key_env": "DEEPSEEK_API_KEY",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-pro", "deepseek-flash"],
     },
     "xiaomi": {
         "base_url": "https://token-plan-sgp.xiaomimimo.com/v1",
