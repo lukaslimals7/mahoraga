@@ -54,11 +54,22 @@ DEFAULT_PROVIDERS = {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-chat",
         "api_key_env": "DEEPSEEK_API_KEY",
+        "models": ["deepseek-chat", "deepseek-reasoner"],
+    },
+    "xiaomi": {
+        "base_url": "https://token-plan-sgp.xiaomimimo.com/v1",
+        "model": "mimo-v2.6-flash",
+        "api_key_env": "XIAOMI_API_KEY",
+        "models": ["mimo-v2.6-flash", "mimo-v2.6-pro",
+                   "mimo-v2.5-pro", "mimo-v2.5"],
     },
     "mimo": {
         "base_url": "https://openrouter.ai/api/v1",
         "model": "xiaomi/mimo-v2.6-flash",
         "api_key_env": "OPENROUTER_API_KEY",
+        "models": ["xiaomi/mimo-v2.6-flash", "xiaomi/mimo-v2.6-pro",
+                   "xiaomi/mimo-v2.6-pro-ultraspeed", "xiaomi/mimo-v2.5-pro",
+                   "xiaomi/mimo-v2.5"],
     },
 }
 
@@ -108,9 +119,12 @@ class Mahoraga:
                     ("base_url", "model", "api_key_env") if k in cfg}
             cfg["providers"] = {"local": {**DEFAULT_PROVIDERS["local"], **flat}}
             cfg["active"] = "local"
-        # cloud presets always available (never clobber the user's edits)
+        # cloud presets always available (never clobber the user's edits);
+        # new default KEYS (like models) land on existing entries too
         for name, pcfg in DEFAULT_PROVIDERS.items():
-            cfg["providers"].setdefault(name, dict(pcfg))
+            entry = cfg["providers"].setdefault(name, {})
+            for k, v in pcfg.items():
+                entry.setdefault(k, v)
         if cfg.get("active") not in cfg["providers"]:
             cfg["active"] = "local"
         p.write_text(json.dumps(cfg, indent=2))
@@ -161,7 +175,18 @@ class Mahoraga:
         return self.provider.model
 
     def available_models(self) -> list[str]:
-        return self.provider.list_models()
+        """Models worth listing for the ACTIVE provider: the curated `models`
+        list from config, else the local server's own catalog, else just the
+        current model. Never dump a platform catalog — OpenRouter's /models
+        returns 400+ models the user's key has nothing to do with."""
+        pcfg = self.active_cfg()
+        curated = pcfg.get("models") or []
+        if curated:
+            return list(curated)
+        if not pcfg.get("api_key_env"):        # local server: its list is ours
+            remote = self.provider.list_models()
+            return remote or [self.provider.model]
+        return [self.provider.model]
 
     def set_model(self, name: str) -> str:
         """Switch the active provider's model at runtime and persist it."""

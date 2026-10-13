@@ -342,8 +342,7 @@ def cli():
                     if models:
                         for m in models[:30]:
                             screen.say(f"  {GOLD}●{R0} {m}" if m == cur else f"    {m}")
-                    else:
-                        screen.say(f"{DIM}(server didn't list models — /model <name> still works){R0}")
+                    screen.say(f"{DIM}(switch to any id directly: /model <name>){R0}")
             elif cmd == "/tools":
                 if arg in ("off", "on"):
                     agent.tools_enabled = arg == "on"
