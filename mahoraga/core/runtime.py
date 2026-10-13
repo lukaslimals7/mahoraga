@@ -76,6 +76,19 @@ class Mahoraga:
         mem.save_message("assistant", answer)
         return answer
 
+    def current_model(self) -> str:
+        return self.provider.model
+
+    def available_models(self) -> list[str]:
+        return self.provider.list_models()
+
+    def set_model(self, name: str) -> str:
+        """Switch the active model at runtime and persist it to config.json."""
+        self.provider.model = name
+        self.cfg["model"] = name
+        CONFIG_PATH.write_text(json.dumps(self.cfg, indent=2))
+        return name
+
     def new_session(self):
         """Forget the in-memory context (memory db keeps history)."""
         self.ctx.messages.clear()

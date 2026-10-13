@@ -23,6 +23,16 @@ class OpenAICompat(LLMProvider):
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
 
+    def list_models(self) -> list[str]:
+        """Ask the server what models it has (OpenAI-compatible GET /models)."""
+        try:
+            req = urllib.request.Request(f"{self.base_url}/models", headers=self._headers())
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+        except Exception:
+            return []
+
     def chat(self, messages, tools=None, stream=False) -> ChatResponse:
         body = {
             "model": self.model,
