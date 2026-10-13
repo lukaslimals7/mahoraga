@@ -157,3 +157,31 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
     reg.register("estimate_tokens", "Rough token estimate for a string.",
         {"type": "object", "properties": {"text": {"type": "string"}},
          "required": ["text"]}, estimate_tokens)
+
+    # ---- long-term memory over the kv table (survives restarts) ----
+    def remember(fact: str) -> str:
+        import json
+        from ..memory import sqlite as mem
+        facts = json.loads(mem.kv_get("facts", "[]"))
+        facts.append(fact)
+        mem.kv_set("facts", json.dumps(facts, ensure_ascii=False))
+        return f"remembered. {len(facts)} fact(s) stored."
+
+    reg.register("remember", "Store an important fact about the user or project "
+        "for future sessions. Use when the user says to remember something.",
+        {"type": "object", "properties": {
+            "fact": {"type": "string", "description": "one self-contained sentence"}},
+         "required": ["fact"]}, remember)
+
+    def recall(query: str = "") -> str:
+        import json
+        from ..memory import sqlite as mem
+        facts = json.loads(mem.kv_get("facts", "[]"))
+        hits = [f for f in facts if query.lower() in f.lower()] if query else facts
+        return "\n".join(f"- {f}" for f in hits[-20:]) or "no memories yet"
+
+    reg.register("recall", "Search stored memories. Call when the user asks "
+        "what you remember, or when a question depends on past context.",
+        {"type": "object", "properties": {
+            "query": {"type": "string", "description": "keyword filter; empty returns everything"}},
+         "required": []}, recall)
