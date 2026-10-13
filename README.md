@@ -7,8 +7,8 @@ A minimal, local, extensible AI agent in pure Python. Zero external dependencies
 Mahoraga is a lightweight agent loop: **you send a message → the LLM thinks →
 if it wants a tool, it calls one → you approve → results go back → it thinks again →
 until it has a real answer.** That's the whole thing. Everything else is decoration.
-
-Hermes has 8,442 Python files. Mahoraga has ~30. The core loop is 50 lines.
+ 
+Mahoraga has ~30. The core loop is 50 lines.
 
 ## Quick start
 
