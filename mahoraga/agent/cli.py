@@ -1,21 +1,21 @@
-"""Mahoraga TUI — three regions, stdlib ANSI only:
+"""Mahoraga TUI — three regions, stdlib ANSI only, Pi-clean:
 
     ┌─────────────────────────────┐
-    │   the wheel (spins while    │  rows 1..wheel_h — never touches below
-    │        she works)           │
+    │   the wheel — spins,        │  rows 1..wheel_h (plain glyphs, exact
+    │   always, that's the brand  │  width, never wraps, never scrolls)
     ├─────────────────────────────┤
-    │   persistent text pane:     │  thinking + answers stream here live,
-    │   conversation lives here   │  tool calls, errors, /command output
+    │   persistent text pane:     │  conversation, thinking, answers, tools
+    │   streams live, never lost  │  — wrapped by VISUAL width, ANSI-safe
     ├─────────────────────────────┤
     │ ❯ your prompt               │  bottom row
     └─────────────────────────────┘
 
-The wheel thread owns the top region and (throttled) pane repaints; the main
-thread owns the buffer and the input row. Nothing ever clears the whole screen
-during work — the pane is persistent.
+Terminal hardening: autowrap is disabled inside the alt screen, so a too-long
+line can only clip at the right edge — it can never wrap, scroll, or shift the
+layout. Every painted row ends in \\033[K (clear to end of line).
 """
 from __future__ import annotations
-import sys, threading, time, json, shutil, textwrap
+import sys, threading, time, json, re, shutil
 
 from ..core.runtime import Mahoraga
 from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
@@ -26,6 +26,28 @@ GREEN = "\033[32m"; RED = "\033[31m"; R0 = "\033[0m"
 
 ALT_ON = "\033[?1049h"
 ALT_OFF = "\033[?1049l"
+NOWRAP = "\033[?7l"      # never autowrap: layout can't be shifted by long lines
+WRAP_ON = "\033[?7h"
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def vis_len(s: str) -> int:
+    return len(_ANSI.sub("", s))
+
+
+def wrap_ansi(line: str, width: int) -> list[str]:
+    """Wrap on spaces by VISUAL width; escape codes don't count toward length."""
+    out, cur = [], ""
+    for word in line.split(" "):
+        cand = f"{cur} {word}" if cur else word
+        if vis_len(cand) > width and cur:
+            out.append(cur)
+            cur = word
+        else:
+            cur = cand
+    out.append(cur)
+    return out or [""]
 
 
 def _at(row: int, col: int = 1) -> str:
@@ -36,30 +58,29 @@ class Screen:
     """Wheel on top, persistent pane in the middle, input on the bottom row."""
 
     def __init__(self):
-        size = shutil.get_terminal_size((100, 34))
+        size = shutil.get_terminal_size((110, 38))
         self.cols, self.rows = size.columns, size.lines
         self.compact = self.rows < 30
-        self.wheel_h = 2 if self.compact else 21   # frame(19) + title + subtitle
+        self.wheel_h = 2 if self.compact else 21      # frame 19 + title + subtitle
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.rows - self.wheel_h - 1)
-        self.entries: list[tuple[str, str]] = []   # (ansi-color, text)
+        self.entries: list[tuple[str, str]] = []      # (ansi-color, text)
+        self._stream_idx: dict[str, int] = {}
         self._dirty = threading.Event()
-        self._frame = 0
-        self._busy = threading.Event()
         self._wheel_stop = threading.Event()
-        self._frozen = True
+        self._frame = 0
+        self.status = "ready"
 
     # ---- lifecycle ----
 
     def enter(self):
-        sys.stdout.write(ALT_ON + HIDE_CURSOR)
+        sys.stdout.write(ALT_ON + NOWRAP + HIDE_CURSOR)
         sys.stdout.flush()
-        threading.Thread(target=self._wheel_loop, daemon=True).start()
-        self._dirty.set()
+        threading.Thread(target=self._loop, daemon=True).start()
 
     def leave(self):
         self._wheel_stop.set()
-        sys.stdout.write(R0 + SHOW_CURSOR + ALT_OFF + RESET)
+        sys.stdout.write(R0 + SHOW_CURSOR + WRAP_ON + ALT_OFF + RESET)
         sys.stdout.flush()
 
     # ---- painting ----
@@ -68,26 +89,28 @@ class Screen:
         out = []
         if self.compact:
             glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-            spin = glyphs[self._frame % len(glyphs)]
-            out.append(_at(1) + f"\033[K {GOLD}{spin} MAHORAGA{R0}")
-            out.append(_at(2) + f"\033[K {DIM}{'thinking…' if self._busy.is_set() else 'ready'}{R0}")
+            g = glyphs[self._frame % len(glyphs)]
+            out.append(_at(1) + f" {GOLD}{g} MAHORAGA{R0}\033[K")
+            out.append(_at(2) + f" {DIM}{self.status}{R0}\033[K")
         else:
-            frame = _make_frame(self._frame, min(self.cols, 112), 19, color=True)
-            for i, line in enumerate(frame.split("\n")[:self.wheel_h]):
-                out.append(_at(1 + i) + line[: self.cols] + "\033[K")
-            for i in range(len(frame.split("\n")), self.wheel_h):
+            # plain glyphs (no ANSI inside lines) + truncate by chars = safe
+            frame = _make_frame(self._frame, min(self.cols - 1, 112), 19, color=False)
+            lines = frame.split("\n")[: self.wheel_h - 1]
+            for i, line in enumerate(lines):
+                out.append(_at(1 + i) + line[: self.cols - 1] + "\033[K")
+            for i in range(len(lines), self.wheel_h - 1):
                 out.append(_at(1 + i) + "\033[K")
+            out.append(_at(self.wheel_h) + f" {GOLD}● {self.status}{R0}\033[K")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    def _wrapped(self):
-        """entries -> wrapped display lines [(color, line)]."""
+    def _wrapped(self) -> list[tuple[str, str]]:
         lines = []
         for color, text in self.entries:
             for para in text.split("\n"):
                 if not para:
                     continue
-                for w in textwrap.wrap(para, width=self.cols - 2) or [""]:
+                for w in wrap_ansi(para, self.cols - 2):
                     lines.append((color, w))
         return lines
 
@@ -104,14 +127,11 @@ class Screen:
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    def _wheel_loop(self):
+    def _loop(self):
+        """Owns the top region always; repaints the pane when dirty."""
         while not self._wheel_stop.is_set():
-            if self._busy.is_set():
-                self._frame += 1
-                self._paint_wheel()
-            elif self._frozen:
-                self._frozen = False
-                self._paint_wheel()
+            self._frame += 1                 # the wheel never stops turning
+            self._paint_wheel()
             if self._dirty.is_set():
                 self._dirty.clear()
                 self._paint_pane()
@@ -134,8 +154,6 @@ class Screen:
         self.entries[idx] = (c, old + text)
         self._dirty.set()
 
-    _stream_idx: dict = {}
-
     def finish_stream(self):
         self._stream_idx = {}
         self._dirty.set()
@@ -151,12 +169,8 @@ class Screen:
             sys.stdout.write(HIDE_CURSOR)
             sys.stdout.flush()
 
-    def set_busy(self, busy: bool):
-        if busy:
-            self._busy.set()
-        else:
-            self._busy.clear()
-            self._frozen = True
+    def kick(self):
+        self._dirty.set()
 
 
 def cli():
@@ -165,45 +179,52 @@ def cli():
     agent = Mahoraga(yolo="--yolo" in sys.argv)
 
     screen.say(f"{GOLD}{BOLD}MAHORAGA{R0} — the adaptive agent · local · minimal · extensible")
-    screen.say(f"{DIM}type /help for commands · /quit to exit{R0}")
+    screen.say(f"{DIM}/help for commands · /quit to exit{R0}")
     screen.say("")
 
-    # dangerous-command prompts land on the bottom row, wheel frozen
-    approval.before_prompt = lambda: screen.set_busy(False)
-    approval.after_prompt = lambda: screen.set_dirty() if hasattr(screen, "set_dirty") else screen._dirty.set()
+    # dangerous-command prompts land on the bottom row; status says so
+    approval.before_prompt = lambda: setattr(screen, "status", "waiting for you…")
+    def _post_prompt():
+        screen.status = "working…"
+        screen.kick()
+    approval.after_prompt = _post_prompt
 
     def on_tool(name, args):
         args_str = json.dumps(args, ensure_ascii=False)[:90]
+        screen.status = f"{name}…"
         screen.say(f"{CYAN}⚙ {name}({args_str}){R0}")
-        screen._paint_pane()
+        screen.kick()
 
     def stream_reply(text):
         screen.say(f"{GOLD}❯ {text}{R0}")
-        screen.set_busy(True)
+        screen.status = "thinking…"
         screen.finish_stream()
-        screen._paint_pane()
+        screen.kick()
 
         def on_delta(piece):
+            screen.status = "speaking…"
             screen.stream_piece(piece, GREEN, "answer")
 
         def on_reason(piece):
+            screen.status = "thinking…"
             screen.stream_piece(piece, DIM, "think")
 
         try:
             answer = agent.send(text, on_delta=on_delta, on_reason=on_reason,
                                 on_tool=on_tool)
         except Exception as e:
-            screen.set_busy(False)
+            screen.status = "ready"
             screen.finish_stream()
             screen.say(f"{RED}✗ {e}{R0}")
-            screen._paint_pane()
+            screen.say("")
+            screen.kick()
             return
-        screen.set_busy(False)
+        screen.status = "ready"
         screen.finish_stream()
         if not answer:
             screen.say(f"{GREEN}(no text){R0}")
         screen.say("")
-        screen._paint_pane()
+        screen.kick()
 
     while True:
         try:
@@ -281,7 +302,7 @@ def cli():
                 screen.say(f"{DIM}memory wiped{R0}")
             else:
                 screen.say(f"{DIM}unknown command: {cmd}{R0}")
-            screen._paint_pane()
+            screen.kick()
             continue
 
         stream_reply(line)
