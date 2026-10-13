@@ -66,17 +66,25 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
     def shell(command: str, timeout: int = 60) -> str:
         try:
             r = subprocess.run(command, shell=True, capture_output=True,
-                               text=True, timeout=timeout, cwd=os.getcwd())
-            out = r.stdout + r.stderr
-            return out[:8000] if out else f"(no output, exit={r.returncode})"
+                               text=True, timeout=timeout)
+            out = (r.stdout + r.stderr).rstrip()
+            tail = f"\n[exit {r.returncode}]" if r.returncode else ""
+            return (out[:8000] + tail) if out else f"(no output, exit={r.returncode})"
         except subprocess.TimeoutExpired:
             return json.dumps({"error": f"timeout after {timeout}s"})
+        except PermissionError as e:
+            return json.dumps({"error": f"permission denied: {e}"})
+        except Exception as e:
+            return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
-    reg.register("shell", "Run a shell command. Returns stdout+stderr (max 8000 chars).",
-        {"type": "object", "properties": {
-            "command": {"type": "string"},
-            "timeout": {"type": "integer", "default": 60}},
-         "required": ["command"]}, shell)
+    shell_schema = {"type": "object", "properties": {
+        "command": {"type": "string"},
+        "timeout": {"type": "integer", "default": 60}},
+        "required": ["command"]}
+    reg.register("shell", "Run a bash command. Returns stdout+stderr + exit code.", shell_schema, shell)
+    # aliases: small models invent tool names — meet them halfway
+    reg.register("bash", "Run a bash command.", shell_schema, shell)
+    reg.register("run_command", "Run a shell command.", shell_schema, shell)
 
     def http_get(url: str, max_bytes: int = 16000) -> str:
         try:
@@ -91,6 +99,40 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
             "url": {"type": "string"}},
          "required": ["url"]}, http_get)
 
+    def write_file(path: str, content: str) -> str:
+        p = os.path.expanduser(path)
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        with open(p, "w") as f:
+            f.write(content)
+        return f"wrote {len(content)} chars to {p}"
+
+    def edit_file(path: str, find: str, replace: str) -> str:
+        p = os.path.expanduser(path)
+        try:
+            with open(p) as f:
+                text = f.read()
+        except FileNotFoundError:
+            return json.dumps({"error": f"not found: {p}"})
+        n = text.count(find)
+        if n == 0:
+            return json.dumps({"error": "find string not present"})
+        with open(p, "w") as f:
+            f.write(text.replace(find, replace))
+        return f"replaced {n} occurrence(s) in {p}"
+
+    reg.register("write_file", "Create or overwrite a file with content.",
+        {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"}},
+         "required": ["path", "content"]}, write_file)
+
+    reg.register("edit_file", "Find/replace inside an existing file (all occurrences).",
+        {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "find": {"type": "string"},
+            "replace": {"type": "string"}},
+         "required": ["path", "find", "replace"]}, edit_file)
+
     def get_notes() -> str:
         try:
             with open(notes_path) as f:
@@ -103,7 +145,8 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
             f.write(content)
         return f"saved {len(content)} chars to notes"
 
-    reg.register("get_notes", "Read persistent notes file.", {}, get_notes)
+    reg.register("get_notes", "Read persistent notes file.",
+        {"type": "object", "properties": {}}, get_notes)
     reg.register("set_notes", "Overwrite the persistent notes file.",
         {"type": "object", "properties": {"content": {"type": "string"}},
          "required": ["content"]}, set_notes)

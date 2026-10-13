@@ -13,10 +13,11 @@ class LLMProvider(ABC):
 
 class ChatResponse:
     def __init__(self, content: str = "", tool_calls: list[dict] | None = None,
-                 usage: dict | None = None):
+                 usage: dict | None = None, thinking: str = ""):
         self.content = content
         self.tool_calls = tool_calls or []
         self.usage = usage or {}
+        self.thinking = thinking          # reasoning_content from thinking models
 
 def tool_call_from_raw(tc: dict) -> dict:
     """Normalize an OpenAI tool_call to a plain dict."""
