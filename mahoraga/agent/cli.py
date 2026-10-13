@@ -66,7 +66,7 @@ class Screen:
         self.status_row = self.rows
         self.input_row = self.rows - 1
         self.sep_row = self.rows - 2
-        self.wheel_h = 2 if self.compact else 10      # small wheel: title + 9 art rows
+        self.wheel_h = 2 if self.compact else 21      # full wheel: title + 19 art rows
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
         self.entries: list[tuple[str, str]] = []      # (ansi-color, text)
@@ -81,6 +81,8 @@ class Screen:
         self.status = "ready"
         self.status_left_extra = ""     # cwd (branch), set by cli()
         self.status_right_extra = ""    # (provider) model, set by cli()
+        self.resize_pending = threading.Event()
+        self._input_snapshot = ("", "", 0)   # prompt, buf, cur for repaints
 
     # ---- lifecycle ----
 
@@ -122,12 +124,12 @@ class Screen:
             out.append(_at(1) + f" {GOLD}{g} MAHORAGA{R0}\033[K")
             out.append(_at(2) + f" {DIM}{self.status}{R0}\033[K")
         else:
-            # small wheel: title + 9 art rows, plain glyphs, exact width
-            frame = _make_frame(self._frame, min(self.cols - 1, 48), 9, color=False)
-            lines = frame.split("\n")[: self.wheel_h]
+            # full wheel: title + 19 art rows, plain glyphs, exact width
+            frame = _make_frame(self._frame, min(self.cols - 1, 112), 19, color=False)
+            lines = frame.split("\n")[: self.wheel_h - 1]
             for i, line in enumerate(lines):
                 out.append(_at(1 + i) + line[: self.cols - 1] + "\033[K")
-            for i in range(len(lines), self.wheel_h):
+            for i in range(len(lines), self.wheel_h - 1):
                 out.append(_at(1 + i) + "\033[K")
             out.append("\033[u")      # restore cursor to wherever the user is typing
         sys.stdout.write("".join(out))
@@ -188,9 +190,32 @@ class Screen:
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
+    def relayout(self):
+        """Terminal resized: recompute every region and repaint from scratch.
+        Without this, regions keep their old row numbers and text lands in
+        the wrong places."""
+        size = shutil.get_terminal_size((110, 38))
+        self.cols, self.rows = size.columns, size.lines
+        self.compact = self.rows < 30
+        self.status_row = self.rows
+        self.input_row = self.rows - 1
+        self.sep_row = self.rows - 2
+        self.wheel_h = 2 if self.compact else 21
+        self.pane_top = self.wheel_h + 1
+        self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
+        sys.stdout.write("\033[2J")        # wipe, then repaint absolutely
+        self._dirty.set()
+        self._paint_wheel()
+        self._paint_pane()
+        self._paint_bottom()
+        self._redraw_input(*self._input_snapshot)
+
     def _loop(self):
         """Owns the top region always; repaints the pane when dirty."""
         while not self._wheel_stop.is_set():
+            if self.resize_pending.is_set():
+                self.resize_pending.clear()
+                self.relayout()
             self._frame += 1                 # the wheel never stops turning
             self._paint_wheel()
             if self._dirty.is_set():
@@ -223,6 +248,7 @@ class Screen:
     def _redraw_input(self, prompt: str, buf: str, cur: int):
         """Paint the input row with the live buffer; horizontal scroll when
         the line is longer than the row (nowrap clips, it never wraps)."""
+        self._input_snapshot = (prompt, buf, cur)
         avail = self.cols - vis_len(prompt) - 1
         start = max(0, cur - avail)
         shown = buf[start: start + max(1, avail)]
@@ -273,6 +299,13 @@ def cli():
     screen = Screen()
     screen.mouse = bool(agent.cfg.get("mouse", False))   # /mouse pref persists
     screen.enter()
+    try:
+        import signal
+        if hasattr(signal, "SIGWINCH"):
+            signal.signal(signal.SIGWINCH,
+                          lambda *_: screen.resize_pending.set())
+    except (ValueError, OSError):
+        pass
 
     screen.say(f"{GOLD}{BOLD}MAHORAGA{R0} — the adaptive agent · local · minimal · extensible")
     screen.say(f"{DIM}/help for commands · /quit to exit{R0}")
