@@ -1,6 +1,6 @@
 """Built-in plugins — each registers itself into a Registry."""
 from __future__ import annotations
-import os, json, subprocess, urllib.request
+import os, json, re, subprocess, urllib.request
 
 def register_all(reg, data_dir: str = "~/.mahoraga"):
     d = os.path.expanduser(data_dir)
@@ -185,3 +185,191 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
         {"type": "object", "properties": {
             "query": {"type": "string", "description": "keyword filter; empty returns everything"}},
          "required": []}, recall)
+
+    # ---- session history search (the messages table already exists) ----
+    def session_search(query: str, limit: int = 10) -> str:
+        from ..memory import sqlite as mem
+        hits = mem.search_messages(query, limit)
+        if not hits:
+            return f"no past messages mention {query!r}"
+        return "\n".join(f"[{r}] {c[:160]}" for r, c in hits)
+
+    reg.register("session_search", "Search past conversation history by keyword. "
+        "Use when the user asks what was said/decided/done earlier.",
+        {"type": "object", "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "default": 10}},
+         "required": ["query"]}, session_search)
+
+    # ---- todo list (multi-step work tracking) ----
+    def todo_list(action: str, text: str = "", index: int = 0) -> str:
+        import json
+        from ..memory import sqlite as mem
+        todos = json.loads(mem.kv_get("todos", "[]"))
+        if action == "add":
+            todos.append({"text": text, "done": False})
+        elif action == "done" and 0 <= index - 1 < len(todos):
+            todos[index - 1]["done"] = True
+        elif action == "clear":
+            todos = [t for t in todos if not t["done"]]
+        mem.kv_set("todos", json.dumps(todos, ensure_ascii=False))
+        if not todos:
+            return "(todo list empty)"
+        return "\n".join(
+            f"{i}. [{'x' if t['done'] else ' '}] {t['text']}"
+            for i, t in enumerate(todos, 1))
+
+    reg.register("todo_list", "Track multi-step work for this session. "
+        "action='add' adds text, 'done' completes item <index> (1-based), "
+        "'clear' drops completed items. Listing happens automatically — "
+        "the return value is always the current list.",
+        {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["add", "done", "clear"]},
+            "text": {"type": "string", "description": "task text for action=add"},
+            "index": {"type": "integer", "description": "1-based item for action=done"}},
+         "required": ["action"]}, todo_list)
+
+    # ---- clarify: ask the human instead of guessing ----
+    def clarify(question: str, choices: list | None = None) -> str:
+        from ..policy import approval
+        if approval.before_prompt:
+            approval.before_prompt()
+        try:
+            print(f"\n  ❓ {question}")
+            for i, c in enumerate(choices or [], 1):
+                print(f"     {i}. {c}")
+            return input("  > ").strip()
+        finally:
+            if approval.after_prompt:
+                approval.after_prompt()
+
+    reg.register("clarify", "Ask the user a question and wait for the answer. "
+        "Use ONLY when the answer changes what you would do next and cannot be "
+        "found or safely defaulted. Optional choices for quick picks.",
+        {"type": "object", "properties": {
+            "question": {"type": "string"},
+            "choices": {"type": "array", "items": {"type": "string"},
+                        "description": "optional quick-pick options"}},
+         "required": ["question"]}, clarify)
+
+    # ---- background processes ----
+    _PROCS: dict[int, dict] = {}
+
+    def process_manage(action: str, command: str = "", pid: int = 0) -> str:
+        import subprocess, tempfile, time
+        if action == "run":
+            log = tempfile.NamedTemporaryFile(
+                prefix="mproc_", suffix=".log", delete=False)
+            p = subprocess.Popen(command, shell=True, stdout=log,
+                                 stderr=subprocess.STDOUT)
+            _PROCS[p.pid] = {"cmd": command, "popen": p, "log": log.name,
+                             "started": time.time()}
+            return f"started pid {p.pid}: {command[:100]}"
+        if action == "list":
+            if not _PROCS:
+                return "(no background processes)"
+            out = []
+            for pid_, info in _PROCS.items():
+                state = "running" if info["popen"].poll() is None \
+                    else f"exit {info['popen'].returncode}"
+                out.append(f"pid {pid_} [{state}] {info['cmd'][:80]}")
+            return "\n".join(out)
+        if action == "poll":
+            info = _PROCS.get(pid)
+            if not info:
+                return f"[error] no such pid {pid} (see action=list)"
+            code = info["popen"].poll()
+            try:
+                with open(info["log"], errors="replace") as f:
+                    tail = f.read()[-2000:]
+            except OSError:
+                tail = ""
+            state = "running" if code is None else f"exited with code {code}"
+            return f"pid {pid} [{state}]\n--- output tail ---\n{tail}"
+        if action == "kill":
+            info = _PROCS.get(pid)
+            if not info:
+                return f"[error] no such pid {pid}"
+            info["popen"].kill()
+            return f"pid {pid} killed"
+        return "[error] action must be run|list|poll|kill"
+
+    reg.register("process_manage", "Run and manage BACKGROUND shell processes "
+        "(long builds, scans, downloads). action='run' starts one and returns "
+        "its pid immediately; 'list' shows all; 'poll' returns status + output "
+        "tail; 'kill' stops one. For quick commands use shell instead.",
+        {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["run", "list", "poll", "kill"]},
+            "command": {"type": "string", "description": "for action=run"},
+            "pid": {"type": "integer", "description": "for poll/kill"}},
+         "required": ["action"]}, process_manage)
+
+    # ---- web search (DuckDuckGo, no API key) ----
+    def web_search(query: str, limit: int = 5) -> str:
+        import urllib.parse
+        UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) mahoraga/1.0"}
+
+        def fetch(req):
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.read().decode("utf-8", errors="replace")
+
+        # primary: POST to the html endpoint (GET gets the bot-detection page)
+        data = urllib.parse.urlencode({"q": query, "b": ""}).encode()
+        page = fetch(urllib.request.Request(
+            "https://html.duckduckgo.com/html/", data=data, headers=UA))
+        results = []
+        for m in re.finditer(
+                r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page):
+            href, title = m.group(1), re.sub(r"<[^>]+>", "", m.group(2))
+            results.append((title.strip(), href))
+        snippets = [re.sub(r"<[^>]+>", "", s).strip() for s in re.findall(
+            r'class="result__snippet"[^>]*>(.*?)</a>', page, re.S)]
+
+        # fallback: the lite endpoint (different markup)
+        if not results:
+            page = fetch(urllib.request.Request(
+                "https://lite.duckduckgo.com/lite/?"
+                + urllib.parse.urlencode({"q": query}), headers=UA))
+            for m in re.finditer(
+                    r'class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', page):
+                href, title = m.group(1), re.sub(r"<[^>]+>", "", m.group(2))
+                results.append((title.strip(), href))
+            snippets = [re.sub(r"<[^>]+>", "", s).strip() for s in re.findall(
+                r'class="result-snippet"[^>]*>(.*?)</td>', page, re.S)]
+
+        for i, (title, href) in enumerate(results):   # unwrap redirect links
+            if "uddg=" in href:
+                results[i] = (title, urllib.parse.unquote(
+                    href.split("uddg=")[1].split("&")[0]))
+        if not results:
+            return "no results"
+        out = []
+        for i, (title, href) in enumerate(results[:limit]):
+            snip = snippets[i] if i < len(snippets) else ""
+            out.append(f"{i+1}. {title}\n   {href}\n   {snip[:160]}")
+        return "\n".join(out)
+
+    reg.register("web_search", "Search the web. Returns top results as "
+        "numbered title / url / snippet lines. Use before web_extract.",
+        {"type": "object", "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "default": 5}},
+         "required": ["query"]}, web_search)
+
+    # ---- web extract (fetch a page as readable text) ----
+    def web_extract(url: str, max_chars: int = 8000) -> str:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) mahoraga/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+        text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", raw)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars] + (f"\n... (truncated at {max_chars})" if len(text) > max_chars else "")
+
+    reg.register("web_extract", "Fetch a web page and return its readable "
+        "text (HTML stripped). Use after web_search to read a result.",
+        {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "max_chars": {"type": "integer", "default": 8000}},
+         "required": ["url"]}, web_extract)

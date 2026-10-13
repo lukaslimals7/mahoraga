@@ -31,6 +31,14 @@ def load_recent(n: int = 30) -> list[tuple[str, str]]:
     ).fetchall()
     return list(reversed(rows))
 
+def search_messages(query: str, limit: int = 20) -> list[tuple[str, str]]:
+    """Grep-ish search over stored conversation history (newest first)."""
+    rows = _db().execute(
+        "SELECT role, content FROM messages WHERE content LIKE ? "
+        "ORDER BY id DESC LIMIT ?", (f"%{query}%", limit)).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def clear_messages():
     _db().execute("DELETE FROM messages")
     _db().commit()
