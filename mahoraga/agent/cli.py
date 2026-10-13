@@ -20,6 +20,7 @@ import sys, threading, time, json, re, shutil
 from ..core.runtime import Mahoraga
 from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
 from ..policy import approval
+from .lineedit import LineEditor, complete
 
 BOLD = "\033[1m"; DIM = "\033[2m"; CYAN = "\033[36m"; GOLD = "\033[33m"
 GREEN = "\033[32m"; RED = "\033[31m"; R0 = "\033[0m"
@@ -160,18 +161,30 @@ class Screen:
         self._stream_idx = {}
         self._dirty.set()
 
-    def input_line(self, prompt: str) -> str:
-        """Bottom-row prompt. The wheel keeps spinning above it."""
-        sys.stdout.write(_at(self.rows) + f"\033[K{prompt}")
+    def _redraw_input(self, prompt: str, buf: str, cur: int):
+        """Paint the prompt row with the live buffer; horizontal scroll when
+        the line is longer than the row (nowrap clips, it never wraps)."""
+        avail = self.cols - vis_len(prompt) - 1
+        start = max(0, cur - avail)
+        shown = buf[start: start + max(1, avail)]
+        sys.stdout.write(_at(self.rows) + prompt + shown + "\033[K"
+                         + _at(self.rows, vis_len(prompt) + (cur - start) + 1))
+        sys.stdout.flush()
+
+    def input_line(self, prompt: str, history: list | None = None,
+                   completer=None, on_options=None) -> str:
+        """Bottom-row prompt with line editing: arrows, history (UP/DOWN),
+        tab completion. The wheel keeps spinning above it."""
+        editor = LineEditor(self._redraw_input, history=history,
+                            completer=completer, on_options=on_options)
         sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
         try:
-            line = input()
+            line = editor.read(prompt)
         finally:
             sys.stdout.write(HIDE_CURSOR)
             sys.stdout.flush()
-        # Enter at the bottom row scrolls the terminal up one line — repaint
-        # every region at absolute positions so the layout self-heals instantly.
+        # repaint every region at absolute positions — layout self-heals
         self._paint_wheel()
         self._paint_pane()
         return line
@@ -195,6 +208,40 @@ def cli():
         screen.status = "working…"
         screen.kick()
     approval.after_prompt = _post_prompt
+
+    # ---- input history (persisted) + tab completion ----
+    import pathlib
+    hist_path = pathlib.Path.home() / ".mahoraga" / "history"
+    try:
+        history = [l for l in hist_path.read_text().splitlines() if l.strip()][-500:]
+    except OSError:
+        history = []
+
+    COMMANDS = ["/help", "/quit", "/exit", "/q", "/new", "/provider",
+                "/model", "/tools", "/memory", "/clear"]
+    model_cache = {"t": 0.0, "list": []}
+
+    def completer(buf, cur):
+        head = buf[:cur]
+        if head.startswith("/model "):
+            if time.time() - model_cache["t"] > 30:
+                model_cache["list"] = agent.available_models()
+                model_cache["t"] = time.time()
+            pool = model_cache["list"]
+        elif head.startswith("/provider "):
+            pool = agent.provider_names()
+        elif head.startswith("/tools "):
+            pool = ["off", "on"]
+        elif " " not in head and head.startswith("/"):
+            pool = COMMANDS
+        else:
+            return None
+        pre, _, _word = head.partition(" ")
+        return complete(buf, cur, pool, len(pre) + 1 if " " in head else 0)
+
+    def on_options(matches):
+        screen.say(f"{DIM}{'  '.join(matches[:15])}{R0}")
+        screen.kick()
 
     def on_tool(name, args):
         args_str = json.dumps(args, ensure_ascii=False)[:90]
@@ -235,13 +282,20 @@ def cli():
 
     while True:
         try:
-            line = screen.input_line(f"{GOLD}❯ {R0}").strip()
+            line = screen.input_line(f"{GOLD}❯ {R0}", history=history,
+                                     completer=completer,
+                                     on_options=on_options).strip()
         except (EOFError, KeyboardInterrupt):
             screen.leave()
             print("bye.")
             break
         if not line:
             continue
+        history.append(line)
+        try:
+            hist_path.write_text("\n".join(history[-500:]) + "\n")
+        except OSError:
+            pass
 
         if line.startswith("/"):
             cmd = line.split()[0]
