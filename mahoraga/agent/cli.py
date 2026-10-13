@@ -62,7 +62,7 @@ class Screen:
         size = shutil.get_terminal_size((110, 38))
         self.cols, self.rows = size.columns, size.lines
         self.compact = self.rows < 30
-        self.wheel_h = 2 if self.compact else 21      # frame 19 + title + subtitle
+        self.wheel_h = 2 if self.compact else 21      # frame 19 + title + status row
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.rows - self.wheel_h - 1)
         self.entries: list[tuple[str, str]] = []      # (ansi-color, text)

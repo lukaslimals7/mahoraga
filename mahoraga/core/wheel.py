@@ -169,14 +169,11 @@ def _make_frame(frame: int, width: int, height: int, color: bool) -> str:
                 line.append(ch)
         out.append("".join(line))
     art = "\n".join(out)
-    title = " MAHORAGA  /  EIGHT-HANDLED SWORD · DIVINE GENERAL "
-    subtitle = " ADAPTATION ENGINE  ::  WHEEL ROTATION ACTIVE "
+    title = " MAHORAGA "
     if color:
         title = f"\033[1;37m{title}\033[0m"
-        subtitle = f"\033[90m{subtitle}\033[0m"
     title = title[:w].center(w)
-    subtitle = subtitle[:w].center(w)
-    return f"{title}\n{art}\n{subtitle}"
+    return f"{title}\n{art}"
 
 
 def animate_mahoraga_wheel(seconds: float | None = None, fps: float = 12,
