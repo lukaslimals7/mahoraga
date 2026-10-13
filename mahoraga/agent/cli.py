@@ -72,6 +72,7 @@ class Screen:
         self._frame = 0
         self._saved_tty = None
         self.busy = False               # True while the model works
+        self.scroll_top: int | None = None   # first visible pane line; None = follow tail
         self.status = "ready"
 
     # ---- lifecycle ----
@@ -79,9 +80,11 @@ class Screen:
     def enter(self):
         # alt screen + no autowrap + NO mouse/alt-scroll reporting (mouse wheel
         # was injecting arrow-key bytes) + tty raw for the app's whole life
+        # SGR mouse on: wheel gives real scroll events (parsed in lineedit);
+        # alt-scroll OFF so the wheel never masquerades as arrow keys;
+        # Shift+drag still selects text in the terminal.
         sys.stdout.write(ALT_ON + NOWRAP + HIDE_CURSOR
-                         + "\033[?1000l\033[?1002l\033[?1003l\033[?1015l"
-                         + "\033[?1006l\033[?1007l")
+                         + "\033[?1007l\033[?1000h\033[?1006h")
         sys.stdout.flush()
         if sys.stdin.isatty():
             self._saved_tty = set_raw(sys.stdin.fileno())
@@ -91,7 +94,8 @@ class Screen:
         self._wheel_stop.set()
         if self._saved_tty is not None:
             restore(sys.stdin.fileno(), self._saved_tty)
-        sys.stdout.write(R0 + SHOW_CURSOR + WRAP_ON + ALT_OFF + RESET)
+        sys.stdout.write("\033[?1006l\033[?1000l"
+                         + R0 + SHOW_CURSOR + WRAP_ON + ALT_OFF + RESET)
         sys.stdout.flush()
 
     # ---- painting ----
@@ -111,8 +115,12 @@ class Screen:
                 out.append(_at(1 + i) + line[: self.cols - 1] + "\033[K")
             for i in range(len(lines), self.wheel_h - 1):
                 out.append(_at(1 + i) + "\033[K")
-            out.append(_at(self.wheel_h) + f" {GOLD}● {self.status}{R0}\033[K")
-        out.append("\033[u")      # restore cursor to wherever the user is typing
+            if self.scroll_top is not None:
+                hint = f"{self.status} · scrolled up (wheel/PgDn to follow)"
+            else:
+                hint = self.status
+            out.append(_at(self.wheel_h) + f" {GOLD}● {hint}{R0}\033[K")
+            out.append("\033[u")      # restore cursor to wherever the user is typing
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -127,7 +135,11 @@ class Screen:
         return lines
 
     def _paint_pane(self):
-        lines = self._wrapped()[-self.pane_h:]
+        all_lines = self._wrapped()
+        max_top = max(0, len(all_lines) - self.pane_h)
+        start = max_top if self.scroll_top is None \
+            else max(0, min(self.scroll_top, max_top))
+        lines = all_lines[start:start + self.pane_h]
         out = ["\033[s"]
         for i in range(self.pane_h):
             row = self.pane_top + i
@@ -197,7 +209,9 @@ class Screen:
         """Bottom-row prompt with line editing: arrows, history (UP/DOWN),
         tab completion. The wheel keeps spinning above it."""
         editor = LineEditor(self._redraw_input, history=history,
-                            completer=completer, on_options=on_options)
+                            completer=completer, on_options=on_options,
+                            on_scroll=self.scroll_by,
+                            on_follow=self.scroll_follow)
         sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
         try:
@@ -209,6 +223,20 @@ class Screen:
         self._paint_wheel()
         self._paint_pane()
         return line
+
+    def scroll_by(self, step: int):
+        """Pane scrollback: +step = newer, -step = older. Reaching the bottom
+        re-enables live follow."""
+        total = len(self._wrapped())
+        max_top = max(0, total - self.pane_h)
+        top = max_top if self.scroll_top is None else self.scroll_top
+        top = max(0, min(top + step, max_top))
+        self.scroll_top = None if top >= max_top else top
+        self._dirty.set()
+
+    def scroll_follow(self):
+        self.scroll_top = None
+        self._dirty.set()
 
     def kick(self):
         self._dirty.set()

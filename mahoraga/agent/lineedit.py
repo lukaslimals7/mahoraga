@@ -16,10 +16,14 @@ UP, DOWN, RIGHT, LEFT, HOME, END = "up", "down", "right", "left", "home", "end"
 DELETE, BACKSPACE, TAB, ENTER = "delete", "backspace", "tab", "enter"
 EOF, INTERRUPT, IGNORE = "eof", "interrupt", "ignore"
 KILL_END, KILL_START, WORD_BACK = "kill_end", "kill_start", "word_back"
+WHEEL_UP, WHEEL_DOWN = "wheel_up", "wheel_down"
+PGUP, PGDN = "pgup", "pgdn"
 TEXT = "text"
 
 _CSI_FINAL = {"A": UP, "B": DOWN, "C": RIGHT, "D": LEFT, "H": HOME, "F": END}
-_CSI_TILDE = {"1": HOME, "3": DELETE, "4": END, "7": HOME, "8": END}
+_CSI_TILDE = {"1": HOME, "3": DELETE, "4": END, "5": PGUP, "6": PGDN,
+              "7": HOME, "8": END}
+_MOUSE_BTN = {64: WHEEL_UP, 65: WHEEL_DOWN}   # SGR wheel buttons
 
 
 def read_byte(fd: int, timeout: float | None = None) -> bytes:
@@ -42,14 +46,22 @@ def decode_key(reader) -> tuple[str, str]:
         return EOF, ""
     if b == b"\x1b":
         seq = b""
-        while len(seq) < 8:
+        while len(seq) < 16:
             nb = reader()
             if not nb:
                 return IGNORE, ""     # bare ESC / incomplete sequence
             seq += nb
-            if seq[-1:] in b"ABCDHF~":
+            # any CSI/SS3 final byte ends the sequence (0x40-0x7E); params
+            # like '<', ';', digits are below that range and keep it open
+            if len(seq) > 1 and 0x40 <= seq[-1] <= 0x7e:
                 break
         s = seq.decode("latin-1")
+        if s.startswith("[<") and s[-1] in "Mm":      # SGR mouse report
+            try:
+                btn = int(s[2:].split(";")[0])
+            except ValueError:
+                return IGNORE, ""
+            return _MOUSE_BTN.get(btn, IGNORE), ""   # clicks/drags ignored
         if s[:1] in ("[", "O") and s[-1] in _CSI_FINAL:
             return _CSI_FINAL[s[-1]], ""
         if s[:1] in ("[", "O") and s[-1] == "~":
@@ -201,11 +213,14 @@ class LineEditor:
     """
 
     def __init__(self, redraw, history: list[str] | None = None,
-                 completer=None, on_options=None):
+                 completer=None, on_options=None,
+                 on_scroll=None, on_follow=None):
         self.redraw = redraw          # (prompt, buf, cur) -> paints the row
         self.state = LineState(history)
         self.completer = completer
         self.on_options = on_options
+        self.on_scroll = on_scroll    # (step) -> None; + = newer, - = older
+        self.on_follow = on_follow    # () -> None; jump back to the live tail
 
     def read(self, prompt: str) -> str:
         """Edit one line. Tty is expected in cbreak+noecho (set_raw by the app).
@@ -228,8 +243,18 @@ class LineEditor:
             def qr():                             # 0.05s deadline for sequences
                 return queue.pop(0) if queue else read_byte(fd, 0.05)
             action, text = decode_key(qr)
+            if action in (WHEEL_UP, PGUP):
+                if self.on_scroll:
+                    self.on_scroll(-4 if action == WHEEL_UP else -12)
+                continue
+            if action in (WHEEL_DOWN, PGDN):
+                if self.on_scroll:
+                    self.on_scroll(4 if action == WHEEL_DOWN else 12)
+                continue
             if action == TEXT:
                 st.insert(text)
+                if self.on_follow:
+                    self.on_follow()
             elif action == ENTER:
                 return
             elif action == BACKSPACE:

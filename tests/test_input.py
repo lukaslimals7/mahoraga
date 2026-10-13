@@ -6,6 +6,7 @@ from mahoraga.agent.lineedit import (
     decode_key, LineState, complete, read_byte,
     UP, DOWN, RIGHT, LEFT, HOME, END, DELETE, BACKSPACE, TAB, ENTER,
     EOF, INTERRUPT, KILL_END, KILL_START, WORD_BACK, TEXT, IGNORE,
+    WHEEL_UP, WHEEL_DOWN, PGUP, PGDN,
 )
 
 
@@ -44,6 +45,12 @@ got = keys("é".encode())              # multibyte utf-8 lands as ONE text key
 assert got == [(TEXT, "é")], got
 got = keys(b"\x1b")                    # lone ESC -> ignored, no crash
 assert got == [(IGNORE, "")], got
+got = keys(b"\x1b[<64;10;5M\x1b[<65;10;5M")   # SGR mouse wheel
+assert got == [(WHEEL_UP, ""), (WHEEL_DOWN, "")], got
+got = keys(b"\x1b[<0;10;5M")           # plain click: ignored, no leak
+assert got == [(IGNORE, "")], got
+got = keys(b"\x1b[5~\x1b[6~")          # PgUp / PgDn
+assert got == [(PGUP, ""), (PGDN, "")], got
 print("key decoding: OK")
 
 # ---- line state ----
