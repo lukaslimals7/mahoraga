@@ -62,9 +62,13 @@ class Screen:
         size = shutil.get_terminal_size((110, 38))
         self.cols, self.rows = size.columns, size.lines
         self.compact = self.rows < 30
-        self.wheel_h = 2 if self.compact else 21      # frame 19 + title + status row
+        # bottom block: rule (rows-2) + input (rows-1) + status bar (rows)
+        self.status_row = self.rows
+        self.input_row = self.rows - 1
+        self.sep_row = self.rows - 2
+        self.wheel_h = 2 if self.compact else 10      # small wheel: title + 9 art rows
         self.pane_top = self.wheel_h + 1
-        self.pane_h = max(3, self.rows - self.wheel_h - 1)
+        self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
         self.entries: list[tuple[str, str]] = []      # (ansi-color, text)
         self._stream_idx: dict[str, int] = {}
         self._dirty = threading.Event()
@@ -72,23 +76,33 @@ class Screen:
         self._frame = 0
         self._saved_tty = None
         self.busy = False               # True while the model works
+        self.mouse = False              # /mouse on enables wheel + tracking
         self.scroll_top: int | None = None   # first visible pane line; None = follow tail
         self.status = "ready"
+        self.status_left_extra = ""     # cwd (branch), set by cli()
+        self.status_right_extra = ""    # (provider) model, set by cli()
 
     # ---- lifecycle ----
 
     def enter(self):
-        # alt screen + no autowrap + NO mouse/alt-scroll reporting (mouse wheel
-        # was injecting arrow-key bytes) + tty raw for the app's whole life
-        # SGR mouse on: wheel gives real scroll events (parsed in lineedit);
-        # alt-scroll OFF so the wheel never masquerades as arrow keys;
-        # Shift+drag still selects text in the terminal.
-        sys.stdout.write(ALT_ON + NOWRAP + HIDE_CURSOR
-                         + "\033[?1007l\033[?1000h\033[?1006h")
+        # alt screen + no autowrap + tty raw for the app's whole life.
+        # Mouse reporting is OPT-IN (self.mouse, /mouse on): tracking steals
+        # the terminal's own text selection, so it stays off by default and
+        # copy/paste works natively. PgUp/PgDn scroll without it.
+        sys.stdout.write(ALT_ON + NOWRAP + HIDE_CURSOR + "\033[?1007l")
+        if self.mouse:
+            sys.stdout.write("\033[?1000h\033[?1006h")
         sys.stdout.flush()
         if sys.stdin.isatty():
             self._saved_tty = set_raw(sys.stdin.fileno())
         threading.Thread(target=self._loop, daemon=True).start()
+
+    def set_mouse(self, on: bool):
+        self.mouse = on
+        sys.stdout.write("\033[?1000h\033[?1006h" if on
+                         else "\033[?1006l\033[?1000l")
+        sys.stdout.flush()
+        self._dirty.set()
 
     def leave(self):
         self._wheel_stop.set()
@@ -108,18 +122,13 @@ class Screen:
             out.append(_at(1) + f" {GOLD}{g} MAHORAGA{R0}\033[K")
             out.append(_at(2) + f" {DIM}{self.status}{R0}\033[K")
         else:
-            # plain glyphs (no ANSI inside lines) + truncate by chars = safe
-            frame = _make_frame(self._frame, min(self.cols - 1, 112), 19, color=False)
-            lines = frame.split("\n")[: self.wheel_h - 1]
+            # small wheel: title + 9 art rows, plain glyphs, exact width
+            frame = _make_frame(self._frame, min(self.cols - 1, 48), 9, color=False)
+            lines = frame.split("\n")[: self.wheel_h]
             for i, line in enumerate(lines):
                 out.append(_at(1 + i) + line[: self.cols - 1] + "\033[K")
-            for i in range(len(lines), self.wheel_h - 1):
+            for i in range(len(lines), self.wheel_h):
                 out.append(_at(1 + i) + "\033[K")
-            if self.scroll_top is not None:
-                hint = f"{self.status} · scrolled up (wheel/PgDn to follow)"
-            else:
-                hint = self.status
-            out.append(_at(self.wheel_h) + f" {GOLD}● {hint}{R0}\033[K")
             out.append("\033[u")      # restore cursor to wherever the user is typing
         sys.stdout.write("".join(out))
         sys.stdout.flush()
@@ -152,13 +161,31 @@ class Screen:
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    def _paint_busy(self):
-        """Prompt row while the model works: spinner + state + how to stop."""
-        glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        g = glyphs[self._frame % len(glyphs)]
-        sys.stdout.write("\033[s" + _at(self.rows)
-                         + f" {GOLD}{g}{R0} {self.status}"
-                         + f"  {DIM}(Ctrl+C to stop){R0}\033[K\033[u")
+    def _paint_bottom(self):
+        """Rule + status bar (the interactive footer): cwd (branch) left,
+        (provider) model • state right. Painted every frame."""
+        out = ["\033[s"]
+        out.append(_at(self.sep_row) + f"{DIM}{'─' * (self.cols - 1)}{R0}\033[K")
+        if self.busy:
+            glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+            g = glyphs[self._frame % len(glyphs)]
+            state = f"{GOLD}{g} {self.status} · Ctrl+C to stop{R0}"
+            plain = f"{self.status} · Ctrl+C to stop"
+        elif self.scroll_top is not None:
+            state = f"{GOLD}scrolled up · PgDn to follow{R0}"
+            plain = "scrolled up · PgDn to follow"
+        else:
+            state = f"{DIM}{self.status}{R0}"
+            plain = self.status
+        left = f" {DIM}{self.status_left_extra}{R0}" if self.status_left_extra else ""
+        right_plain = f"{self.status_right_extra} • {plain}" if self.status_right_extra else plain
+        right = f"{GOLD}{self.status_right_extra}{R0} {DIM}•{R0} {state}" \
+            if self.status_right_extra else state
+        x = self.cols - 1 - vis_len(right_plain)
+        out.append(_at(self.status_row) + left + "\033[K")
+        out.append(_at(self.status_row, max(2, x)) + right + "\033[K")
+        out.append("\033[u")
+        sys.stdout.write("".join(out))
         sys.stdout.flush()
 
     def _loop(self):
@@ -169,8 +196,7 @@ class Screen:
             if self._dirty.is_set():
                 self._dirty.clear()
                 self._paint_pane()
-            if self.busy:
-                self._paint_busy()
+            self._paint_bottom()
             time.sleep(0.08)
 
     # ---- buffer API (main thread) ----
@@ -195,13 +221,13 @@ class Screen:
         self._dirty.set()
 
     def _redraw_input(self, prompt: str, buf: str, cur: int):
-        """Paint the prompt row with the live buffer; horizontal scroll when
+        """Paint the input row with the live buffer; horizontal scroll when
         the line is longer than the row (nowrap clips, it never wraps)."""
         avail = self.cols - vis_len(prompt) - 1
         start = max(0, cur - avail)
         shown = buf[start: start + max(1, avail)]
-        sys.stdout.write(_at(self.rows) + prompt + shown + "\033[K"
-                         + _at(self.rows, vis_len(prompt) + (cur - start) + 1))
+        sys.stdout.write(_at(self.input_row) + prompt + shown + "\033[K"
+                         + _at(self.input_row, vis_len(prompt) + (cur - start) + 1))
         sys.stdout.flush()
 
     def input_line(self, prompt: str, history: list | None = None,
@@ -243,9 +269,10 @@ class Screen:
 
 
 def cli():
-    screen = Screen()
-    screen.enter()
     agent = Mahoraga(yolo="--yolo" in sys.argv)
+    screen = Screen()
+    screen.mouse = bool(agent.cfg.get("mouse", False))   # /mouse pref persists
+    screen.enter()
 
     screen.say(f"{GOLD}{BOLD}MAHORAGA{R0} — the adaptive agent · local · minimal · extensible")
     screen.say(f"{DIM}/help for commands · /quit to exit{R0}")
@@ -291,6 +318,29 @@ def cli():
     def on_options(matches):
         screen.say(f"{DIM}{'  '.join(matches[:15])}{R0}")
         screen.kick()
+
+    # ---- status bar contents: cwd (branch) + (provider) model ----
+    import subprocess as _sp, time as _t
+    _branch_cache = {"t": 0.0, "cwd": "", "name": ""}
+
+    def _git_branch(cwd):
+        if _t.time() - _branch_cache["t"] > 3 or _branch_cache["cwd"] != cwd:
+            _branch_cache.update(t=_t.time(), cwd=cwd)
+            try:
+                r = _sp.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                            cwd=cwd, capture_output=True, text=True, timeout=1)
+                _branch_cache["name"] = r.stdout.strip() if r.returncode == 0 else ""
+            except Exception:
+                _branch_cache["name"] = ""
+        return _branch_cache["name"]
+
+    def refresh_statusbar():
+        from ..plugins import shell_cwd
+        cwd = shell_cwd()
+        short = cwd.replace(str(pathlib.Path.home()), "~", 1)
+        branch = _git_branch(cwd)
+        screen.status_left_extra = f"{short} ({branch})" if branch else short
+        screen.status_right_extra = f"({agent.active_name()}) {agent.current_model()}"
 
     def on_tool(name, args):
         args_str = json.dumps(args, ensure_ascii=False)[:90]
@@ -341,6 +391,7 @@ def cli():
         screen.kick()
 
     while True:
+        refresh_statusbar()
         try:
             line = screen.input_line(f"{GOLD}❯ {R0}", history=history,
                                      completer=completer,
@@ -378,11 +429,12 @@ def cli():
                           "/tools           list tools", "/tools off|on    disable/enable tools",
                           "/cd <path>       change the shell working dir (persists)",
                           "/pwd             where the shell runs",
+                          "/mouse on|off    wheel-scroll the pane (off = native copy/paste)",
                           "/memory          recent stored messages",
                           "/clear           wipe stored memory"]:
                     screen.say(f"  {h}")
                 screen.say(f"{DIM}Ctrl+C stops a reply · ^C at prompt clears the line · "
-                           f"yolo: python -m mahoraga --yolo{R0}")
+                           f"PgUp/PgDn scroll the output · yolo: python -m mahoraga --yolo{R0}")
             elif cmd == "/new":
                 agent.new_session()
                 screen.say(f"{DIM}context cleared{R0}")
@@ -391,6 +443,7 @@ def cli():
                     try:
                         name = agent.switch_provider(arg)
                         screen.say(f"{DIM}provider -> {name} ({agent.current_model()}){R0}")
+                        refresh_statusbar()
                         if not agent.provider_key_ok():
                             screen.say(f"{RED}⚠ {agent.active_cfg().get('api_key_env')} not set in env{R0}")
                     except ValueError as e:
@@ -403,6 +456,7 @@ def cli():
             elif cmd == "/model":
                 if arg:
                     screen.say(f"{DIM}model -> {agent.set_model(arg)}{R0}")
+                    refresh_statusbar()
                 else:
                     cur = agent.current_model()
                     screen.say(f"{BOLD}current:{R0} {cur}")
@@ -425,6 +479,12 @@ def cli():
                     screen.say(f"{DIM}shell cwd -> {set_shell_cwd(arg) if arg else shell_cwd()}{R0}")
                 except (NotADirectoryError, FileNotFoundError):
                     screen.say(f"{RED}not a directory: {arg}{R0}")
+            elif cmd == "/mouse":
+                on = arg != "off"
+                screen.set_mouse(on)
+                agent.cfg["mouse"] = on
+                agent._save_config()
+                screen.say(f"{DIM}mouse {'on — wheel scrolls the pane, Shift+drag selects' if on else 'off — native select/copy works, PgUp/PgDn scroll'}{R0}")
             elif cmd == "/pwd":
                 from ..plugins import shell_cwd
                 screen.say(f"{DIM}shell cwd: {shell_cwd()}{R0}")

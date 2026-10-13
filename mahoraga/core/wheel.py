@@ -35,8 +35,8 @@ def _line_points(x0: float, y0: float, x1: float, y1: float):
 
 def _make_frame(frame: int, width: int, height: int, color: bool) -> str:
     # Use a logical 2:1 coordinate system because terminal cells are tall.
-    w = max(56, min(width, 112))
-    h = max(19, min(height, 34))
+    w = max(28, min(width, 112))
+    h = max(8, min(height, 34))
     canvas = [[0.0 for _ in range(w)] for _ in range(h)]
     zbuf = [[-999.0 for _ in range(w)] for _ in range(h)]
     cx, cy = (w - 1) / 2, (h - 1) / 2
