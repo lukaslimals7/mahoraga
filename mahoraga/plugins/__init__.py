@@ -1,11 +1,14 @@
 """Built-in plugins — each registers itself into a Registry."""
 from __future__ import annotations
-import os, json, re, subprocess, urllib.request
+import os, json, re, shlex, subprocess, urllib.request
 
-# persistent shell working directory (survives across tool calls; /cd in the
-# TUI updates it too). Subprocesses can't cd the parent — so every command
-# runs inside `cd <cwd> && ...` and a bare `cd <path>` moves the anchor.
-SHELL_STATE = {"cwd": os.path.expanduser("~")}
+from ..tools.shell_session import ShellSession
+
+# ONE persistent shell session: cd / export / source venv all stick across
+# tool calls (cd x && y also persists — it's a real shell now). SHELL_STATE
+# mirrors the session cwd for the status bar and relative-path tools.
+_SESSION = ShellSession()
+SHELL_STATE = {"cwd": _SESSION.cwd}
 
 
 def shell_cwd() -> str:
@@ -16,8 +19,16 @@ def set_shell_cwd(path: str) -> str:
     p = os.path.abspath(os.path.expanduser(path))
     if not os.path.isdir(p):
         raise NotADirectoryError(p)
-    SHELL_STATE["cwd"] = p
-    return p
+    _SESSION.run(f"cd {shlex.quote(p)}")
+    SHELL_STATE["cwd"] = _SESSION.cwd
+    return SHELL_STATE["cwd"]
+
+
+def _resolve(path: str) -> str:
+    """Relative paths resolve against the SHELL's cwd, so tools see the same
+    directory the shell does."""
+    p = os.path.expanduser(path)
+    return p if os.path.isabs(p) else os.path.join(SHELL_STATE["cwd"], p)
 
 def register_all(reg, data_dir: str = "~/.mahoraga"):
     d = os.path.expanduser(data_dir)
@@ -25,7 +36,7 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
     notes_path = os.path.join(d, "notes.md")
 
     def read_file(path: str, max_lines: int = 400) -> str:
-        p = os.path.expanduser(path)
+        p = _resolve(path)
         if not os.path.isfile(p):
             return json.dumps({"error": f"not found: {p}"})
         with open(p, "r", errors="replace") as f:
@@ -42,7 +53,7 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
          "required": ["path"]}, read_file)
 
     def search_files(query: str, root: str = ".") -> str:
-        root = os.path.expanduser(root)
+        root = _resolve(root)
         hits = []
         for dirpath, _, files in os.walk(root):
             if any(x in dirpath for x in (".git", "node_modules", "__pycache__")):
@@ -67,7 +78,7 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
          "required": ["query"]}, search_files)
 
     def list_dir(path: str = ".") -> str:
-        p = os.path.expanduser(path)
+        p = _resolve(path)
         try:
             entries = sorted(os.listdir(p))
             return "\n".join(entries) if entries else "(empty)"
@@ -81,28 +92,14 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
         list_dir)
 
     def shell(command: str, timeout: int = 60) -> str:
-        cmd = command.strip()
-        # a bare `cd <path>` (no chaining) moves the persistent anchor
-        m = re.fullmatch(r"cd\s+(.+)", cmd)
-        if m and "&&" not in cmd and ";" not in cmd and "|" not in cmd:
-            try:
-                return f"cwd -> {set_shell_cwd(m.group(1).strip().strip(chr(39)).strip(chr(34)))}"
-            except NotADirectoryError as e:
-                return json.dumps({"error": f"not a directory: {e}"})
-        if cmd == "cd" or cmd == "pwd":
-            return SHELL_STATE["cwd"]
         try:
-            # run inside the persistent cwd; chained `cd x && y` works in-call
-            r = subprocess.run(cmd, shell=True, capture_output=True,
-                               text=True, timeout=timeout,
-                               cwd=SHELL_STATE["cwd"])
-            out = (r.stdout + r.stderr).rstrip()
-            tail = f"\n[exit {r.returncode}]" if r.returncode else ""
-            return (out[:8000] + tail) if out else f"(no output, exit={r.returncode})"
-        except subprocess.TimeoutExpired:
-            return json.dumps({"error": f"timeout after {timeout}s"})
-        except PermissionError as e:
-            return json.dumps({"error": f"permission denied: {e}"})
+            out, code, cwd = _SESSION.run(command, timeout)
+            SHELL_STATE["cwd"] = cwd
+            body = out.rstrip()
+            tail = f"\n[exit {code}]" if code not in (0, None) else ""
+            if not body:
+                return f"(no output, exit={code}, cwd={cwd})"
+            return body[:8000] + tail
         except Exception as e:
             return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -110,10 +107,14 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
         "command": {"type": "string"},
         "timeout": {"type": "integer", "default": 60}},
         "required": ["command"]}
-    reg.register("shell", "Run a bash command. Returns stdout+stderr + exit code.", shell_schema, shell)
+    reg.register("shell", "Run a bash command. Returns stdout+stderr + exit "
+        "code. PERSISTENT SESSION: one long-lived shell — cd, exported vars "
+        "and activated venvs STICK across calls (even `cd x && y` moves the "
+        "directory for later calls). Rely on it. Non-interactive commands "
+        "only; use process_manage for long/interactive work.", shell_schema, shell)
     # aliases: small models invent tool names — meet them halfway
-    reg.register("bash", "Run a bash command.", shell_schema, shell)
-    reg.register("run_command", "Run a shell command.", shell_schema, shell)
+    reg.register("bash", "Run a bash command (persistent shell session).", shell_schema, shell)
+    reg.register("run_command", "Run a shell command (persistent shell session).", shell_schema, shell)
 
     def http_get(url: str, max_bytes: int = 16000) -> str:
         try:
@@ -129,14 +130,14 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
          "required": ["url"]}, http_get)
 
     def write_file(path: str, content: str) -> str:
-        p = os.path.expanduser(path)
+        p = _resolve(path)
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         with open(p, "w") as f:
             f.write(content)
         return f"wrote {len(content)} chars to {p}"
 
     def edit_file(path: str, find: str, replace: str) -> str:
-        p = os.path.expanduser(path)
+        p = _resolve(path)
         try:
             with open(p) as f:
                 text = f.read()
