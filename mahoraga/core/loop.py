@@ -14,7 +14,8 @@ from ..core.budget import Budget
 def run_turn(user_text: str, ctx: Context, provider: LLMProvider,
              registry: Registry, budget: Budget,
              yolo: bool = False, on_thinking=None, on_tool=None,
-             on_delta=None, on_reason=None, tools_on: bool = True) -> str:
+             on_delta=None, on_reason=None, tools_on: bool = True,
+             on_result=None) -> str:
     """One user turn → final assistant answer (may involve many tool calls)."""
     ctx.add_user(user_text)
     tools = registry.schemas() if tools_on else None
@@ -48,5 +49,10 @@ def run_turn(user_text: str, ctx: Context, provider: LLMProvider,
         for tc in resp.tool_calls:
             if on_tool:
                 on_tool(tc["name"], tc["arguments"])
+            import time as _time
+            _t0 = _time.time()
             result = execute(registry, tc["name"], tc["arguments"], yolo=yolo)
+            if on_result:
+                on_result(tc["name"], tc["arguments"], result,
+                          _time.time() - _t0)
             ctx.add_tool_result(tc["id"], result)

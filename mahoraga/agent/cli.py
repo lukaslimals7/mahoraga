@@ -25,6 +25,21 @@ from .lineedit import LineEditor, complete, set_raw, restore
 BOLD = "\033[1m"; DIM = "\033[2m"; CYAN = "\033[36m"; GOLD = "\033[33m"
 GREEN = "\033[32m"; RED = "\033[31m"; R0 = "\033[0m"
 
+# block renderer palette (OpenCode-style banded output)
+INK = "\033[38;2;236;234;229m"      # reading text
+ITAL = "\033[3m"                     # thinking
+GRTXT = "\033[38;2;198;222;198m"     # pale green text on tool cards
+BG_USER = "\033[48;2;38;52;72m"      # slate-blue user band
+BG_TOOL = "\033[48;2;33;48;37m"      # deep-green tool card
+
+
+def _md(s: str) -> str:
+    """Light markdown cleanup for terminal display (the model writes markdown;
+    the pane shows clean text)."""
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = re.sub(r"^#{1,6}\s+", "", s, flags=re.M)
+    return s.replace("**", "").replace("`", "")
+
 ALT_ON = "\033[?1049h"
 ALT_OFF = "\033[?1049l"
 NOWRAP = "\033[?7l"      # never autowrap: layout can't be shifted by long lines
@@ -69,8 +84,10 @@ class Screen:
         self.wheel_h = 2 if self.compact else 21      # full wheel: title + 19 art rows
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
-        self.entries: list[tuple[str, str]] = []      # (ansi-color, text)
+        self.entries: list[dict] = []    # blocks: user/think/answer/note/tool
         self._stream_idx: dict[str, int] = {}
+        self.expand_tools = False        # Ctrl+O toggles full tool output
+        self._pending_tools: list[int] = []
         self._dirty = threading.Event()
         self._wheel_stop = threading.Event()
         self._frame = 0
@@ -135,15 +152,61 @@ class Screen:
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
+    def _wrap_plain(self, text: str, width: int, style: str = "") -> list[str]:
+        """Wrap clean text and re-apply the style to every visual row."""
+        out = []
+        for para in text.split("\n"):
+            if not para:
+                continue
+            for w in wrap_ansi(para, width):
+                out.append(style + w if style else w)
+        return out
+
     def _wrapped(self) -> list[tuple[str, str]]:
-        lines = []
-        for color, text in self.entries:
-            for para in text.split("\n"):
-                if not para:
-                    continue
-                for w in wrap_ansi(para, self.cols - 2):
-                    lines.append((color, w))
-        return lines
+        """Render blocks to rows of (bg, styled_text): user = slate band,
+        tools = green cards ($ cmd · output · Took Ns), thinking = dim italic,
+        answers = plain ink."""
+        W = self.cols - 2
+        rows: list[tuple[str, str]] = []
+        for e in self.entries:
+            k = e.get("kind", "note")
+            if k == "note":
+                color = e.get("color", "")
+                rows += [("", (color + w) if color else w)
+                         for w in self._wrap_plain(e["text"], W)]
+            elif k == "user":
+                rows.append(("", ""))
+                rows += [(BG_USER, w) for w in
+                         self._wrap_plain(e["text"], self.cols - 4, INK)]
+                rows.append(("", ""))
+            elif k == "think":
+                rows += [("", w) for w in
+                         self._wrap_plain(_md(e["text"]), W, DIM + ITAL)]
+                rows.append(("", ""))
+            elif k == "answer":
+                rows += [("", w) for w in
+                         self._wrap_plain(_md(e["text"]), W, INK)]
+                rows.append(("", ""))
+            elif k == "tool":
+                rows.append(("", ""))
+                meta = f" {DIM}({e['meta']})" if e.get("meta") else ""
+                rows.append((BG_TOOL, f"{GRTXT}$ {_md(e['head'])}{meta}"))
+                rows.append((BG_TOOL, ""))
+                if e.get("out") is None:
+                    body = [f"{DIM}running…"]
+                else:
+                    out_lines = _md(e["out"]).splitlines() or ["(no output)"]
+                    if len(out_lines) > 10 and not self.expand_tools:
+                        out_lines = [f"{DIM}… ({len(out_lines) - 10} earlier "
+                                     f"lines, ctrl+o to expand)"] + out_lines[-10:]
+                    body = [GRTXT + l for l in out_lines]
+                    if e.get("dur") is not None:
+                        body.append(f"{DIM}Took {e['dur']:.1f}s")
+                for b in body:
+                    rows += [(BG_TOOL, w) for w in
+                             self._wrap_plain(b, self.cols - 4)]
+                rows.append((BG_TOOL, ""))
+        return rows
 
     def _paint_pane(self):
         all_lines = self._wrapped()
@@ -155,8 +218,12 @@ class Screen:
         for i in range(self.pane_h):
             row = self.pane_top + i
             if i < len(lines):
-                color, text = lines[i]
-                out.append(_at(row) + f"{color}{text}{R0}\033[K")
+                bg, text = lines[i]
+                if bg:   # band rows: fill the full width with the background
+                    pad = " " * max(0, self.cols - 1 - vis_len(text))
+                    out.append(_at(row) + bg + text + pad + R0 + "\033[K")
+                else:
+                    out.append(_at(row) + f"{text}{R0}\033[K")
             else:
                 out.append(_at(row) + "\033[K")
         out.append("\033[u")
@@ -227,18 +294,41 @@ class Screen:
     # ---- buffer API (main thread) ----
 
     def say(self, text: str, color: str = ""):
-        self.entries.append((color, text))
+        """Plain note rows (help text, errors, /command output)."""
+        self.entries.append({"kind": "note", "text": text, "color": color})
+        self._dirty.set()
+
+    def user_msg(self, text: str):
+        self.entries.append({"kind": "user", "text": text})
+        self._dirty.set()
+
+    def tool_call(self, head: str, meta: str = "") -> int:
+        self.entries.append({"kind": "tool", "head": head, "meta": meta,
+                             "out": None, "dur": None})
+        idx = len(self.entries) - 1
+        self._pending_tools.append(idx)
+        self._dirty.set()
+        return idx
+
+    def tool_result(self, out: str, dur: float):
+        if self._pending_tools:
+            self.entries[self._pending_tools.pop(0)].update(out=out, dur=dur)
+            self._dirty.set()
+
+    def toggle_tools(self):
+        self.expand_tools = not self.expand_tools
         self._dirty.set()
 
     def stream_piece(self, text: str, color: str, key: str):
-        """Append to the entry tagged `key` (created on first piece)."""
+        """Append to the block tagged `key` (think/answer, created on first
+        piece)."""
         idx = self._stream_idx.get(key)
         if idx is None or idx >= len(self.entries):
-            self.entries.append((color, ""))
+            kind = key if key in ("think", "answer") else "note"
+            self.entries.append({"kind": kind, "text": "", "color": color})
             idx = len(self.entries) - 1
             self._stream_idx[key] = idx
-        c, old = self.entries[idx]
-        self.entries[idx] = (c, old + text)
+        self.entries[idx]["text"] += text
         self._dirty.set()
 
     def finish_stream(self):
@@ -257,13 +347,14 @@ class Screen:
         sys.stdout.flush()
 
     def input_line(self, prompt: str, history: list | None = None,
-                   completer=None, on_options=None) -> str:
+                   completer=None, on_options=None, on_expand=None) -> str:
         """Bottom-row prompt with line editing: arrows, history (UP/DOWN),
         tab completion. The wheel keeps spinning above it."""
         editor = LineEditor(self._redraw_input, history=history,
                             completer=completer, on_options=on_options,
                             on_scroll=self.scroll_by,
-                            on_follow=self.scroll_follow)
+                            on_follow=self.scroll_follow,
+                            on_expand=on_expand)
         sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
         try:
@@ -376,29 +467,38 @@ def cli():
         screen.status_right_extra = f"({agent.active_name()}) {agent.current_model()}"
 
     def on_tool(name, args):
-        args_str = json.dumps(args, ensure_ascii=False)[:90]
+        if name in ("shell", "bash", "run_command"):
+            head = str(args.get("command", ""))
+            meta = f"timeout {args.get('timeout', 60)}s"
+        else:
+            head = f"{name} " + json.dumps(args, ensure_ascii=False)[:70]
+            meta = ""
         screen.status = f"{name}…"
-        screen.say(f"{CYAN}⚙ {name}({args_str}){R0}")
+        screen.tool_call(head, meta)
+        screen.kick()
+
+    def on_result(name, args, result, dur):
+        screen.tool_result(result, dur)
         screen.kick()
 
     def stream_reply(text):
-        screen.say(f"{GOLD}❯ {text}{R0}")
+        screen.user_msg(text)
         screen.status = "thinking…"
         screen.finish_stream()
         screen.kick()
 
         def on_delta(piece):
             screen.status = "speaking…"
-            screen.stream_piece(piece, GREEN, "answer")
+            screen.stream_piece(piece, "", "answer")
 
         def on_reason(piece):
             screen.status = "thinking…"
-            screen.stream_piece(piece, DIM, "think")
+            screen.stream_piece(piece, "", "think")
 
         screen.busy = True
         try:
             answer = agent.send(text, on_delta=on_delta, on_reason=on_reason,
-                                on_tool=on_tool)
+                                on_tool=on_tool, on_result=on_result)
         except KeyboardInterrupt:
             screen.busy = False
             screen.status = "stopped"
@@ -428,7 +528,8 @@ def cli():
         try:
             line = screen.input_line(f"{GOLD}❯ {R0}", history=history,
                                      completer=completer,
-                                     on_options=on_options).strip()
+                                     on_options=on_options,
+                                     on_expand=screen.toggle_tools).strip()
         except KeyboardInterrupt:
             # ^C at the prompt: cancel the line, never the session
             screen.say(f"{DIM}^C{R0}")
@@ -466,8 +567,9 @@ def cli():
                           "/memory          recent stored messages",
                           "/clear           wipe stored memory"]:
                     screen.say(f"  {h}")
-                screen.say(f"{DIM}Ctrl+C stops a reply · ^C at prompt clears the line · "
-                           f"PgUp/PgDn scroll the output · yolo: python -m mahoraga --yolo{R0}")
+                screen.say(f"{DIM}Ctrl+C stops a reply · ^C clears the line · "
+                           f"Ctrl+O expands tool output · PgUp/PgDn scrolls · "
+                           f"yolo: python -m mahoraga --yolo{R0}")
             elif cmd == "/new":
                 agent.new_session()
                 screen.say(f"{DIM}context cleared{R0}")

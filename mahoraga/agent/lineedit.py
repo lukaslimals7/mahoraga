@@ -18,6 +18,7 @@ EOF, INTERRUPT, IGNORE = "eof", "interrupt", "ignore"
 KILL_END, KILL_START, WORD_BACK = "kill_end", "kill_start", "word_back"
 WHEEL_UP, WHEEL_DOWN = "wheel_up", "wheel_down"
 PGUP, PGDN = "pgup", "pgdn"
+EXPAND = "expand"
 TEXT = "text"
 
 _CSI_FINAL = {"A": UP, "B": DOWN, "C": RIGHT, "D": LEFT, "H": HOME, "F": END}
@@ -87,6 +88,8 @@ def decode_key(reader) -> tuple[str, str]:
         return KILL_START, ""
     if b == b"\x17":
         return WORD_BACK, ""
+    if b == b"\x0f":
+        return EXPAND, ""
     if b[0] < 0x20:
         return IGNORE, ""
     # utf-8: this byte plus any continuation bytes
@@ -214,13 +217,14 @@ class LineEditor:
 
     def __init__(self, redraw, history: list[str] | None = None,
                  completer=None, on_options=None,
-                 on_scroll=None, on_follow=None):
+                 on_scroll=None, on_follow=None, on_expand=None):
         self.redraw = redraw          # (prompt, buf, cur) -> paints the row
         self.state = LineState(history)
         self.completer = completer
         self.on_options = on_options
         self.on_scroll = on_scroll    # (step) -> None; + = newer, - = older
         self.on_follow = on_follow    # () -> None; jump back to the live tail
+        self.on_expand = on_expand    # () -> None; toggle tool-output expand
 
     def read(self, prompt: str) -> str:
         """Edit one line. Tty is expected in cbreak+noecho (set_raw by the app).
@@ -250,6 +254,11 @@ class LineEditor:
             if action in (WHEEL_DOWN, PGDN):
                 if self.on_scroll:
                     self.on_scroll(4 if action == WHEEL_DOWN else 12)
+                continue
+            if action == EXPAND:
+                if self.on_expand:
+                    self.on_expand()
+                self.redraw(prompt, st.buf, st.cur)
                 continue
             if action == TEXT:
                 st.insert(text)

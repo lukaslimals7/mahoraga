@@ -198,14 +198,14 @@ class Mahoraga:
     # ---- chat ----
 
     def send(self, text: str, on_thinking=None, on_tool=None,
-             on_delta=None, on_reason=None) -> str:
+             on_delta=None, on_reason=None, on_result=None) -> str:
         self.turn_count += 1
         budget = Budget(max_turns=self.cfg.get("max_turns", 20),
                         max_tokens=self.cfg.get("budget_tokens", 32_000))
         answer = run_turn(text, self.ctx, self.provider, self.registry, budget,
                           yolo=self.yolo, on_thinking=on_thinking,
                           on_tool=on_tool, on_delta=on_delta, on_reason=on_reason,
-                          tools_on=self.tools_enabled)
+                          tools_on=self.tools_enabled, on_result=on_result)
         mem.save_message("user", text)
         mem.save_message("assistant", answer)
         return answer
