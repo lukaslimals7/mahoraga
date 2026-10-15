@@ -12,6 +12,38 @@ class LLMError(Exception):
     """A readable provider failure — the server's message, not a traceback."""
 
 
+def _extract_ids(data) -> list[str]:
+    """Model ids out of every shape servers actually return:
+    {"data":[{"id":…}]} (OpenAI) · {"models":[{"name"|"model"|"id":…}]}
+    (llama.cpp router) · a bare list of dicts or strings."""
+    items = None
+    if isinstance(data, dict):
+        for key in ("data", "models"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+    elif isinstance(data, list):
+        items = data
+    if not items:
+        return []
+    out: list[str] = []
+    for it in items:
+        if isinstance(it, str) and it:
+            out.append(it)
+        elif isinstance(it, dict):
+            for key in ("id", "name", "model"):
+                v = it.get(key)
+                if isinstance(v, str) and v:
+                    out.append(v)
+                    break
+    seen, uniq = set(), []
+    for m in out:
+        if m not in seen:
+            seen.add(m)
+            uniq.append(m)
+    return uniq
+
+
 def _sanitize_schema(obj):
     """Drop `additionalProperties` recursively: DeepSeek 400s on it; OpenAI
     tolerates its absence just fine."""
@@ -63,14 +95,40 @@ class OpenAICompat(LLMProvider):
         except TimeoutError:
             raise LLMError(f"timed out talking to {self.base_url}") from None
 
+    def _get_json(self, url: str, timeout: float = 15.0):
+        req = urllib.request.Request(url, headers=self._headers())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+
     def list_models(self) -> list[str]:
-        """Ask the server what models it has (OpenAI-compatible GET /models)."""
+        """Ask the server what models it has.
+
+        Tries `/v1/models` (via base_url), then the bare host `/models`, each
+        with and without `?reload=1` — llama.cpp's router re-scans its presets
+        on reload, which is how a model added to the presets dir shows up
+        without a restart. Accepts every response shape (see `_extract_ids`).
+        Empty list = server unreachable or nothing advertised."""
+        root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        urls = [f"{self.base_url}/models"]
+        if root != self.base_url:
+            urls.append(f"{root}/models")
+        for url in urls:
+            for suffix in ("", "?reload=1"):
+                try:
+                    ids = _extract_ids(self._get_json(url + suffix))
+                except Exception:
+                    ids = []
+                if ids:
+                    return ids
+        return []
+
+    def reachable(self) -> bool:
+        """True if the server answers at all (used for a clear error message)."""
         try:
-            with self._request("/models", timeout=15) as resp:
-                data = json.loads(resp.read())
-            return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+            self._get_json(f"{self.base_url}/models", timeout=4)
+            return True
         except Exception:
-            return []
+            return False
 
     def chat(self, messages, tools=None, stream=False,
              on_delta=None, on_reason=None) -> ChatResponse:

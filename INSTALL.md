@@ -81,6 +81,39 @@ ollama pull llama3.2
 # base_url: http://127.0.0.1:11434/v1
 ```
 
+### Serving a menu of models — llama.cpp router mode
+
+Router mode puts every preset behind one endpoint. Mahoraga asks the server what
+it has (`GET /v1/models`, then the native `/models`, retrying with `?reload=1`
+to force a preset re-scan) and lists all of them:
+
+```bash
+llama-server --models /path/to/models --port 8080     # or --models-preset presets.ini
+# drop a new .gguf into that directory and /model refresh picks it up — no restart
+```
+
+In the TUI, `/model` prints a numbered menu of everything the server advertises
+and `/model <n>` switches to it — the next request carries that model id and
+llama.cpp loads it on demand:
+
+```
+●  1  Qwen/Qwen3-1.7B-GGUF:Q8_0
+   2  ggml-org/SmolLM3-3B-GGUF:Q4_K_M
+   3  openbmb/MiniCPM5-2B-GGUF:Q4_K_M
+   ...
+pick: /model <n>  ·  /model <name>  ·  /model refresh re-queries
+```
+
+- Only one model in the menu? The server probably didn't answer —
+  `curl http://127.0.0.1:8080/v1/models` should list them all. Make sure
+  `base_url` in the config ends with `/v1`.
+- Serving **another machine**: start llama-server with `--host 0.0.0.0` and point
+  `base_url` at that machine's LAN address (e.g. `http://192.168.1.20:8080/v1`).
+  Bound to the default `127.0.0.1`, it is only reachable from that same machine.
+- A provider can also carry a pinned fallback list (`"models": [...]` in the
+  config). For local servers the **live server list wins**; the pinned list is
+  used only when the server can't be reached.
+
 ### Option B — cloud API (DeepSeek, OpenRouter, anything OpenAI-compatible)
 
 Put keys in `~/.mahoraga/.env` — they are read from the environment on every
@@ -184,7 +217,7 @@ hey                     → a normal reply, NO tool calls (this is the health ch
 list the files here     → a green tool card with real output
 /help                   → all commands
 /provider               → list providers, /provider deepseek to switch
-/model                  → list models, /model <name> to switch
+/model                  → numbered menu of models, /model <n> to pick one
 ```
 
 ### Essential keys
@@ -255,6 +288,7 @@ Three ways to whitelist, all persistent:
 | `^[[A` appears when pressing arrows | not a TTY (or an ancient copy) | run it in a real terminal; pull latest |
 | tools fire on a plain "hey" | the TOOL DISCIPLINE paragraph was removed from `system` | restore it (step 4) |
 | `… (N earlier lines, ctrl+o to expand)` | long tool output is collapsed by design | press `Ctrl+O` |
+| only the model from my config shows up locally | the server didn't answer `/v1/models` (down, wrong port, `base_url` missing `/v1`, or it's single-model mode) | `curl http://127.0.0.1:8080/v1/models`; fix `base_url`; `/model refresh`; or pin `"models": [...]` on the provider |
 | syntax errors on launch | Python < 3.10 | upgrade Python |
 
 ---

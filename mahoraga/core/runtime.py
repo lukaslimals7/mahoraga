@@ -180,13 +180,24 @@ class Mahoraga:
         current model. Never dump a platform catalog — OpenRouter's /models
         returns 400+ models the user's key has nothing to do with."""
         pcfg = self.active_cfg()
-        curated = pcfg.get("models") or []
-        if curated:
-            return list(curated)
-        if not pcfg.get("api_key_env"):        # local server: its list is ours
+        curated = list(pcfg.get("models") or [])
+        if not pcfg.get("api_key_env"):        # local server: ask the server first
             remote = self.provider.list_models()
-            return remote or [self.provider.model]
-        return [self.provider.model]
+            if remote:
+                return remote
+            return curated or [self.provider.model]
+        return curated or [self.provider.model]
+
+    def resolve_model(self, arg: str) -> str | None:
+        """`/model <arg>` → a model id. A number picks from the current list."""
+        arg = (arg or "").strip()
+        if not arg:
+            return None
+        if arg.isdigit():
+            models = self.available_models()
+            i = int(arg) - 1
+            return models[i] if 0 <= i < len(models) else None
+        return arg
 
     def set_model(self, name: str) -> str:
         """Switch the active provider's model at runtime and persist it."""

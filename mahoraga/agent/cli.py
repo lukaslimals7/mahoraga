@@ -564,7 +564,8 @@ def cli():
                 for h in ["/help            this", "/quit            exit",
                           "/new             fresh context (memory keeps history)",
                           "/provider        list providers", "/provider <n>    switch provider",
-                          "/model           list models", "/model <name>    switch model",
+                          "/model           list models (numbered)", "/model <n|name>  switch model",
+                          "/model refresh   re-query the server's model list",
                           "/tools           list tools", "/tools off|on    disable/enable tools",
                           "/allow           list whitelisted commands",
                           "/allow <regex>   whitelist a command (runs without asking)",
@@ -597,17 +598,33 @@ def cli():
                         mark = f"{GOLD}●{R0}" if n == cur else " "
                         screen.say(f" {mark} {BOLD}{n}{R0} · {DIM}{agent.cfg['providers'][n].get('model','')}{R0}")
             elif cmd == "/model":
+                if arg in ("refresh", "list"):
+                    arg = ""
                 if arg:
-                    screen.say(f"{DIM}model -> {agent.set_model(arg)}{R0}")
-                    refresh_statusbar()
+                    picked = agent.resolve_model(arg)
+                    if not picked:
+                        screen.say(f"{RED}no model #{arg}{R0} — /model lists them")
+                    else:
+                        screen.say(f"{DIM}model -> {agent.set_model(picked)}{R0}")
+                        refresh_statusbar()
                 else:
                     cur = agent.current_model()
-                    screen.say(f"{BOLD}current:{R0} {cur}")
                     models = agent.available_models()
-                    if models:
-                        for m in models[:30]:
-                            screen.say(f"  {GOLD}●{R0} {m}" if m == cur else f"    {m}")
-                    screen.say(f"{DIM}(switch to any id directly: /model <name>){R0}")
+                    pcfg = agent.active_cfg()
+                    screen.say(f"{BOLD}current:{R0} {cur}  {DIM}({agent.active_name()}){R0}")
+                    for i, m in enumerate(models[:30], 1):
+                        mark = f"{GOLD}●{R0}" if m == cur else " "
+                        screen.say(f" {mark} {DIM}{i:>2}{R0}  {m}")
+                    if len(models) == 1 and not pcfg.get("api_key_env"):
+                        if not getattr(agent.provider, "reachable", lambda: True)():
+                            screen.say(f"{RED}can't reach {pcfg.get('base_url','')}{R0} "
+                                       f"— is the model server running?")
+                        else:
+                            screen.say(f"{DIM}server listed one model — add more via "
+                                       f"llama.cpp presets, or set \"models\": [...] "
+                                       f"in ~/.mahoraga/config.json{R0}")
+                    screen.say(f"{DIM}pick: /model <n>  ·  /model <name>  ·  "
+                               f"/model refresh re-queries{R0}")
             elif cmd == "/tools":
                 if arg in ("off", "on"):
                     agent.tools_enabled = arg == "on"
