@@ -24,6 +24,11 @@ python3 -m mahoraga
 python3 -m mahoraga --yolo
 ```
 
+**New here? → [INSTALL.md](INSTALL.md)** — the full setup guide (requirements,
+model wiring, config reference, first-run walkthrough, whitelisting,
+troubleshooting). No `pip install`: Python 3.10+ and a real terminal is all it
+needs.
+
 ## Architecture
 
 ```
