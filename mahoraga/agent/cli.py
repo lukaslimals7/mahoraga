@@ -21,6 +21,7 @@ from ..core.runtime import Mahoraga
 from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
 from ..policy import approval
 from .lineedit import LineEditor, complete, set_raw, restore
+from .markdown import render as md_render
 
 BOLD = "\033[1m"; DIM = "\033[2m"; CYAN = "\033[36m"; GOLD = "\033[33m"
 GREEN = "\033[32m"; RED = "\033[31m"; R0 = "\033[0m"
@@ -33,12 +34,10 @@ BG_USER = "\033[48;2;38;52;72m"      # slate-blue user band
 BG_TOOL = "\033[48;2;33;48;37m"      # deep-green tool card
 
 
-def _md(s: str) -> str:
-    """Light markdown cleanup for terminal display (the model writes markdown;
-    the pane shows clean text)."""
-    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
-    s = re.sub(r"^#{1,6}\s+", "", s, flags=re.M)
-    return s.replace("**", "").replace("`", "")
+def _md(s: str, width: int = 100, tables: bool = True) -> str:
+    """Markdown -> clean terminal text (tables become aligned columns).
+    `tables=False` for raw program output, where `|` may be real data."""
+    return md_render(s, width, tables)
 
 ALT_ON = "\033[?1049h"
 ALT_OFF = "\033[?1049l"
@@ -181,21 +180,22 @@ class Screen:
                 rows.append(("", ""))
             elif k == "think":
                 rows += [("", w) for w in
-                         self._wrap_plain(_md(e["text"]), W, DIM + ITAL)]
+                         self._wrap_plain(_md(e["text"], W), W, DIM + ITAL)]
                 rows.append(("", ""))
             elif k == "answer":
                 rows += [("", w) for w in
-                         self._wrap_plain(_md(e["text"]), W, INK)]
+                         self._wrap_plain(_md(e["text"], W), W, INK)]
                 rows.append(("", ""))
             elif k == "tool":
                 rows.append(("", ""))
                 meta = f" {DIM}({e['meta']})" if e.get("meta") else ""
-                rows.append((BG_TOOL, f"{GRTXT}$ {_md(e['head'])}{meta}"))
+                rows.append((BG_TOOL, f"{GRTXT}$ {_md(e['head'], tables=False)}{meta}"))
                 rows.append((BG_TOOL, ""))
                 if e.get("out") is None:
                     body = [f"{DIM}running…"]
                 else:
-                    out_lines = _md(e["out"]).splitlines() or ["(no output)"]
+                    out_lines = _md(e["out"], self.cols - 4,
+                                    tables=False).splitlines() or ["(no output)"]
                     if len(out_lines) > 10 and not self.expand_tools:
                         out_lines = [f"{DIM}… ({len(out_lines) - 10} earlier "
                                      f"lines, ctrl+o to expand)"] + out_lines[-10:]
