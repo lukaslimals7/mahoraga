@@ -418,7 +418,7 @@ def cli():
         history = []
 
     COMMANDS = ["/help", "/quit", "/exit", "/q", "/new", "/provider",
-                "/model", "/tools", "/memory", "/clear"]
+                "/model", "/tools", "/allow", "/memory", "/clear"]
     model_cache = {"t": 0.0, "list": []}
 
     def completer(buf, cur):
@@ -432,6 +432,11 @@ def cli():
             pool = agent.provider_names()
         elif head.startswith("/tools "):
             pool = ["off", "on"]
+        elif head.startswith("/allow rm "):
+            from ..policy import permissions as _perm
+            pool = [str(i) for i in range(1, len(_perm.list_allow()) + 1)]
+        elif head.startswith("/allow "):
+            pool = ["rm"]
         elif " " not in head and head.startswith("/"):
             pool = COMMANDS
         else:
@@ -561,6 +566,9 @@ def cli():
                           "/provider        list providers", "/provider <n>    switch provider",
                           "/model           list models", "/model <name>    switch model",
                           "/tools           list tools", "/tools off|on    disable/enable tools",
+                          "/allow           list whitelisted commands",
+                          "/allow <regex>   whitelist a command (runs without asking)",
+                          "/allow rm <n>    remove a whitelist rule",
                           "/cd <path>       change the shell working dir (persists)",
                           "/pwd             where the shell runs",
                           "/mouse on|off    wheel-scroll the pane (off = native copy/paste)",
@@ -623,6 +631,25 @@ def cli():
             elif cmd == "/pwd":
                 from ..plugins import shell_cwd
                 screen.say(f"{DIM}shell cwd: {shell_cwd()}{R0}")
+            elif cmd == "/allow":
+                from ..policy import permissions as _perm
+                if not arg:
+                    rules = _perm.list_allow()
+                    if not rules:
+                        screen.say(f"{DIM}allowlist is empty — /allow <regex> blesses a "
+                                   f"command\n  file: {_perm.allow_path()}{R0}")
+                    else:
+                        screen.say(f"{BOLD}allowlist{R0} {DIM}{_perm.allow_path()}{R0}")
+                        for i, r in enumerate(rules, 1):
+                            screen.say(f"  {GOLD}{i}{R0}  {r}")
+                        screen.say(f"{DIM}remove one: /allow rm <n>{R0}")
+                elif arg.startswith("rm "):
+                    which = arg[3:].strip()
+                    ok = _perm.remove_allow(which)
+                    screen.say(f"{DIM}{'removed: ' + which if ok else 'not found: ' + which}{R0}")
+                else:
+                    ok = _perm.add_allow(arg)
+                    screen.say(f"{DIM}{'whitelisted: ' + arg if ok else 'already whitelisted or invalid regex'}{R0}")
             elif cmd == "/memory":
                 from ..memory import sqlite as mem
                 for role, content in mem.load_recent(10):

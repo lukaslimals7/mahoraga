@@ -46,7 +46,7 @@ mahoraga/
 ├── plugins/
 │   └── __init__.py    ← 8 built-in tools (read, search, shell, http, notes…)
 ├── policy/
-│   ├── permissions.py ← safe / write / unsafe tiers
+│   ├── permissions.py ← SAFE / ASK / BLOCK + user whitelist (~/.mahoraga/allow)
 │   ├── approval.py    ← human-in-the-loop prompt
 │   └── audit.py       ← append-only JSONL audit log
 ├── memory/
@@ -54,6 +54,32 @@ mahoraga/
 └── agent/
     ├── cli.py         ← the TUI (ANSI, stdlib-only, wheel as spinner)
     └── __main__.py    ← entry point
+```
+
+## Policy & whitelisting commands
+
+Philosophy: **run everything, question only danger.** Ordinary shell commands and
+all file operations run without friction; only genuinely dangerous commands ask.
+
+- `ASK` tier (prompts `Allow? [y/N/a]`): `rm -r`, `sudo`, `chmod -R`, `kill -9`,
+  `killall`, `systemctl`, `shred`, writes to `/etc/`, …
+- `BLOCK` tier (refused outright, **cannot be whitelisted** — disk/system
+  destruction only): `mkfs`, `dd if=`, `> /dev/sdX`, `shutdown`/`reboot`,
+  `kill -9 -1`, fork bombs, `rm -rf /`
+
+Three ways to whitelist a command so it never asks again:
+
+```bash
+# 1. in the TUI — bless a pattern (regex, one per line)
+/allow pkill -f firefox
+/allow killall firefox
+/allow                  # list rules (with numbers)
+/allow rm 2             # remove rule 2
+
+# 2. at a danger prompt, answer "a" — whitelists that exact command
+
+# 3. edit the file directly (applied live, no restart)
+$EDITOR ~/.mahoraga/allow
 ```
 
 ## How to add a tool

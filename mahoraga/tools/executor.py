@@ -18,11 +18,12 @@ def execute(reg: Registry, name: str, args: dict, yolo: bool = False) -> str:
         risk = permissions.shell_risk(str(args.get("command", "")))
         if risk == permissions.BLOCK:
             audit.log(name, args, ok=False)
-            return ("[refused] that command is on the danger list (disk/system "
-                    "destruction). Run it yourself in a terminal if you truly mean it.")
+            return ("[refused] hard-blocked (disk/system destruction) — this one "
+                    "cannot be whitelisted. Run it yourself if you truly mean it.")
         if risk == permissions.ASK and not approval.ask(name, args, yolo=yolo):
             audit.log(name, args, ok=False)
-            return "[user denied this tool call]"
+            return ("[user denied this tool call — whitelist it with "
+                    "/allow <pattern> in the TUI to skip the prompt next time]")
     result = reg.execute(name, args)
     audit.log(name, args, ok='"error"' not in result[:20])
     return result[:MAX_RESULT]
