@@ -9,7 +9,17 @@ import json, urllib.request, urllib.error
 from .provider import LLMProvider, ChatResponse, tool_call_from_raw
 
 class LLMError(Exception):
-    """A readable provider failure — the server's message, not a traceback."""
+    """A readable provider failure — the server's message, not a traceback.
+
+    Carries `code` (HTTP status or None) and `url` so callers can react to a
+    specific failure (a 404 on the wrong path prefix, say) instead of matching
+    on text.
+    """
+
+    def __init__(self, message: str, code: int | None = None, url: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.url = url
 
 
 def _extract_ids(data) -> list[str]:
@@ -74,26 +84,55 @@ class OpenAICompat(LLMProvider):
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
 
-    def _request(self, path: str, body: dict | None = None, timeout: float | None = None):
+    def _bases(self) -> list[str]:
+        """Candidate API roots: the configured base_url, and the same host with
+        the /v1 prefix added or removed. llama.cpp's router answers on
+        `/v1/models` while the bare host serves `/models`, and users point
+        `base_url` at both spellings — so accept either."""
+        b = self.base_url.rstrip("/")
+        alt = b[:-3].rstrip("/") if b.endswith("/v1") else b + "/v1"
+        return [b] + ([alt] if alt and alt != b else [])
+
+    def _request(self, path: str, body: dict | None = None,
+                 timeout: float | None = None, base: str | None = None):
+        url = f"{base or self.base_url}{path}"
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
-            f"{self.base_url}{path}", data=data,
-            headers=self._headers(), method="POST" if body is not None else "GET")
+            url, data=data, headers=self._headers(),
+            method="POST" if body is not None else "GET")
         try:
-            return urllib.request.urlopen(req, timeout=timeout or self.timeout)
+            resp = urllib.request.urlopen(req, timeout=timeout or self.timeout)
+            self.base_url = base or self.base_url      # remember what worked
+            return resp
         except urllib.error.HTTPError as e:
             try:
                 detail = json.loads(e.read())
                 msg = detail.get("error", {}).get("message") or str(detail)[:200]
             except Exception:
                 msg = e.reason or str(e)
-            raise LLMError(f"{msg}  (HTTP {e.code} @ {self.base_url})") from None
+            raise LLMError(f"{msg}  (HTTP {e.code} @ {base or self.base_url})",
+                           code=e.code, url=url) from None
         except urllib.error.URLError as e:
             raise LLMError(
-                f"can't reach {self.base_url} — is the server running? ({e.reason})"
-            ) from None
+                f"can't reach {base or self.base_url} — is the server running? "
+                f"({e.reason})", url=url) from None
         except TimeoutError:
-            raise LLMError(f"timed out talking to {self.base_url}") from None
+            raise LLMError(f"timed out talking to {base or self.base_url}",
+                           url=url) from None
+
+    def _chat_post(self, body: dict, timeout: float | None = None):
+        """POST /chat/completions, tolerating a base_url that omits (or adds)
+        the /v1 prefix: a 404 falls through to the alternate root once."""
+        last: LLMError | None = None
+        for base in self._bases():
+            try:
+                return self._request("/chat/completions", body,
+                                     timeout=timeout, base=base)
+            except LLMError as e:
+                last = e
+                if e.code not in (404, 405):
+                    raise
+        raise last if last else LLMError("no API root available")
 
     def _get_json(self, url: str, timeout: float = 15.0):
         req = urllib.request.Request(url, headers=self._headers())
@@ -108,10 +147,7 @@ class OpenAICompat(LLMProvider):
         on reload, which is how a model added to the presets dir shows up
         without a restart. Accepts every response shape (see `_extract_ids`).
         Empty list = server unreachable or nothing advertised."""
-        root = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
-        urls = [f"{self.base_url}/models"]
-        if root != self.base_url:
-            urls.append(f"{root}/models")
+        urls = [f"{b}/models" for b in self._bases()]
         for url in urls:
             for suffix in ("", "?reload=1"):
                 try:
@@ -119,16 +155,19 @@ class OpenAICompat(LLMProvider):
                 except Exception:
                     ids = []
                 if ids:
+                    self.base_url = url.rsplit("/models", 1)[0]
                     return ids
         return []
 
     def reachable(self) -> bool:
         """True if the server answers at all (used for a clear error message)."""
-        try:
-            self._get_json(f"{self.base_url}/models", timeout=4)
-            return True
-        except Exception:
-            return False
+        for base in self._bases():
+            try:
+                self._get_json(f"{base}/models", timeout=4)
+                return True
+            except Exception:
+                continue
+        return False
 
     def chat(self, messages, tools=None, stream=False,
              on_delta=None, on_reason=None) -> ChatResponse:
@@ -143,7 +182,7 @@ class OpenAICompat(LLMProvider):
             body["tools"] = _sanitize_schema(tools)
 
         if not body["stream"]:
-            with self._request("/chat/completions", body) as resp:
+            with self._chat_post(body) as resp:
                 data = json.loads(resp.read())
             msg = data["choices"][0].get("message", {})
             tcs = [tool_call_from_raw(tc) for tc in msg.get("tool_calls") or []]
@@ -158,7 +197,7 @@ class OpenAICompat(LLMProvider):
         content_parts, think_parts = [], []
         tc_frag: dict[int, dict] = {}
         usage = {}
-        with self._request("/chat/completions", body) as resp:
+        with self._chat_post(body) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"):
