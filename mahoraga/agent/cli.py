@@ -65,6 +65,19 @@ def wrap_ansi(line: str, width: int) -> list[str]:
     return out or [""]
 
 
+def _wheel_height(rows: int, compact: bool) -> int:
+    """Height of the wheel region (title line + art rows).
+
+    Compact terminals get the 2-line spinner. Otherwise the wheel takes about a
+    third of the height in stable 2-row steps — so it grows with the window
+    instead of being pinned at 21 — clamped to a floor of 9 (the art itself
+    needs 8 rows) and a ceiling of 28 so the transcript keeps most of the screen.
+    """
+    if compact:
+        return 2
+    return max(9, min(28, (rows // 6) * 2))
+
+
 def _at(row: int, col: int = 1) -> str:
     return f"\033[{row};{col}H"
 
@@ -80,7 +93,7 @@ class Screen:
         self.status_row = self.rows
         self.input_row = self.rows - 1
         self.sep_row = self.rows - 2
-        self.wheel_h = 2 if self.compact else 21      # full wheel: title + 19 art rows
+        self.wheel_h = _wheel_height(self.rows, self.compact)
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
         self.entries: list[dict] = []    # blocks: user/think/answer/note/tool
@@ -142,8 +155,9 @@ class Screen:
             out.append(_at(1) + f" {GOLD}{g} MAHORAGA{R0}\033[K")
             out.append(_at(2) + f" {DIM}{self.status}{R0}\033[K")
         else:
-            # full wheel: title + 19 art rows, plain glyphs, exact width
-            frame = _make_frame(self._frame, min(self.cols - 1, 112), 19, color=False)
+            # full wheel: title + art rows sized to the region, plain glyphs, exact width
+            art_h = max(8, self.wheel_h - 1)
+            frame = _make_frame(self._frame, min(self.cols - 1, 112), art_h, color=False)
             lines = frame.split("\n")[: self.wheel_h - 1]
             for i, line in enumerate(lines):
                 out.append(_at(1 + i) + line[: self.cols - 1] + "\033[K")
@@ -274,7 +288,7 @@ class Screen:
         self.status_row = self.rows
         self.input_row = self.rows - 1
         self.sep_row = self.rows - 2
-        self.wheel_h = 2 if self.compact else 21
+        self.wheel_h = _wheel_height(self.rows, self.compact)
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
         sys.stdout.write("\033[2J")        # wipe, then repaint absolutely
