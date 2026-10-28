@@ -65,6 +65,12 @@ def wrap_ansi(line: str, width: int) -> list[str]:
     return out or [""]
 
 
+# Aspect ratio of the art. The shape comes from w/h (rx = w*0.285, ry = h*0.245)
+# and terminal cells are ~2:1 tall, so the original 112x19 (5.9:1) rendered as a
+# flattened pancake. 4.0 keeps a visible rim and still fills the top band.
+_WHEEL_ASPECT = 4.0
+
+
 def _wheel_height(rows: int, compact: bool) -> int:
     """Height of the wheel region (title line + art rows).
 
@@ -75,7 +81,9 @@ def _wheel_height(rows: int, compact: bool) -> int:
     """
     if compact:
         return 2
-    return max(9, min(28, (rows // 6) * 2))
+    # 21 is the size the banner was designed at — never shrink below it (that's
+    # what made it look squashed); grow gently on tall terminals, cap at 28.
+    return max(21, min(28, int(rows * 0.45)))
 
 
 def _at(row: int, col: int = 1) -> str:
@@ -155,12 +163,16 @@ class Screen:
             out.append(_at(1) + f" {GOLD}{g} MAHORAGA{R0}\033[K")
             out.append(_at(2) + f" {DIM}{self.status}{R0}\033[K")
         else:
-            # full wheel: title + art rows sized to the region, plain glyphs, exact width
-            art_h = max(8, self.wheel_h - 1)
-            frame = _make_frame(self._frame, min(self.cols - 1, 112), art_h, color=False)
+            # The art's shape comes from the w/h ratio (rx = w*0.285, ry = h*0.245),
+            # so shrinking height alone squashes the wheel. Keep the designed
+            # proportion — 112 cols x 19 rows — and scale both axes together.
+            art_h = max(8, self.wheel_h - 2)          # -1 title, -1 region line
+            art_w = max(28, min(self.cols - 1, int(art_h * _WHEEL_ASPECT)))
+            pad = max(0, (self.cols - 1 - art_w) // 2)
+            frame = _make_frame(self._frame, art_w, art_h, color=False)
             lines = frame.split("\n")[: self.wheel_h - 1]
             for i, line in enumerate(lines):
-                out.append(_at(1 + i) + line[: self.cols - 1] + "\033[K")
+                out.append(_at(1 + i) + (" " * pad) + line[: self.cols - 1] + "\033[K")
             for i in range(len(lines), self.wheel_h - 1):
                 out.append(_at(1 + i) + "\033[K")
             out.append("\033[u")      # restore cursor to wherever the user is typing
