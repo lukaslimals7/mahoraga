@@ -1,21 +1,29 @@
 """SQLite memory: every turn persisted, restored on next launch. Zero ORM."""
 from __future__ import annotations
-import sqlite3, time, pathlib
+import sqlite3, threading, time, pathlib
 
 DB_PATH = pathlib.Path.home() / ".mahoraga" / "memory.db"
-_conn: sqlite3.Connection | None = None
+
+# One connection PER THREAD. Turns run on a worker thread while the UI thread
+# keeps reading history, and sqlite3.Connection is bound to its creating thread —
+# a shared connection raises "SQLite objects created in a thread can only be
+# used in that same thread". Thread-local connections avoid that without a lock.
+_local = threading.local()
+
 
 def _db() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(DB_PATH)
-        _conn.execute("""CREATE TABLE IF NOT EXISTS messages(
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")     # readers don't block the writer
+        conn.execute("""CREATE TABLE IF NOT EXISTS messages(
             id INTEGER PRIMARY KEY, role TEXT, content TEXT, ts REAL)""")
-        _conn.execute("""CREATE TABLE IF NOT EXISTS kv(
+        conn.execute("""CREATE TABLE IF NOT EXISTS kv(
             key TEXT PRIMARY KEY, value TEXT)""")
-        _conn.commit()
-    return _conn
+        conn.commit()
+        _local.conn = conn
+    return conn
 
 def init():
     _db()

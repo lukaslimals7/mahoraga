@@ -15,7 +15,7 @@ line can only clip at the right edge — it can never wrap, scroll, or shift the
 layout. Every painted row ends in \\033[K (clear to end of line).
 """
 from __future__ import annotations
-import sys, threading, time, json, re, shutil
+import sys, threading, time, json, re, shutil, queue
 
 from ..core.runtime import Mahoraga
 from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
@@ -89,6 +89,8 @@ class Screen:
         self._pending_tools: list[int] = []
         self._dirty = threading.Event()
         self._wheel_stop = threading.Event()
+        self._lock = threading.RLock()      # guards entries vs the render thread
+        self.queued = 0                     # messages waiting behind the current turn
         self._frame = 0
         self._saved_tty = None
         self.busy = False               # True while the model works
@@ -162,6 +164,10 @@ class Screen:
         return out
 
     def _wrapped(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return self._wrapped_locked()
+
+    def _wrapped_locked(self) -> list[tuple[str, str]]:
         """Render blocks to rows of (bg, styled_text): user = slate band,
         tools = green cards ($ cmd · output · Took Ns), thinking = dim italic,
         answers = plain ink."""
@@ -238,8 +244,9 @@ class Screen:
         if self.busy:
             glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
             g = glyphs[self._frame % len(glyphs)]
-            state = f"{GOLD}{g} {self.status} · Ctrl+C to stop{R0}"
-            plain = f"{self.status} · Ctrl+C to stop"
+            extra = f" · +{self.queued} queued" if self.queued else ""
+            state = f"{GOLD}{g} {self.status}{extra} · /stop clears{R0}"
+            plain = f"{self.status}{extra} · /stop clears"
         elif self.scroll_top is not None:
             state = f"{GOLD}scrolled up · PgDn to follow{R0}"
             plain = "scrolled up · PgDn to follow"
@@ -295,25 +302,29 @@ class Screen:
 
     def say(self, text: str, color: str = ""):
         """Plain note rows (help text, errors, /command output)."""
-        self.entries.append({"kind": "note", "text": text, "color": color})
+        with self._lock:
+            self.entries.append({"kind": "note", "text": text, "color": color})
         self._dirty.set()
 
     def user_msg(self, text: str):
-        self.entries.append({"kind": "user", "text": text})
+        with self._lock:
+            self.entries.append({"kind": "user", "text": text})
         self._dirty.set()
 
     def tool_call(self, head: str, meta: str = "") -> int:
-        self.entries.append({"kind": "tool", "head": head, "meta": meta,
-                             "out": None, "dur": None})
-        idx = len(self.entries) - 1
-        self._pending_tools.append(idx)
+        with self._lock:
+            self.entries.append({"kind": "tool", "head": head, "meta": meta,
+                                 "out": None, "dur": None})
+            idx = len(self.entries) - 1
+            self._pending_tools.append(idx)
         self._dirty.set()
         return idx
 
     def tool_result(self, out: str, dur: float):
-        if self._pending_tools:
-            self.entries[self._pending_tools.pop(0)].update(out=out, dur=dur)
-            self._dirty.set()
+        with self._lock:
+            if self._pending_tools:
+                self.entries[self._pending_tools.pop(0)].update(out=out, dur=dur)
+        self._dirty.set()
 
     def toggle_tools(self):
         self.expand_tools = not self.expand_tools
@@ -322,13 +333,14 @@ class Screen:
     def stream_piece(self, text: str, color: str, key: str):
         """Append to the block tagged `key` (think/answer, created on first
         piece)."""
-        idx = self._stream_idx.get(key)
-        if idx is None or idx >= len(self.entries):
-            kind = key if key in ("think", "answer") else "note"
-            self.entries.append({"kind": kind, "text": "", "color": color})
-            idx = len(self.entries) - 1
-            self._stream_idx[key] = idx
-        self.entries[idx]["text"] += text
+        with self._lock:
+            idx = self._stream_idx.get(key)
+            if idx is None or idx >= len(self.entries):
+                kind = key if key in ("think", "answer") else "note"
+                self.entries.append({"kind": kind, "text": "", "color": color})
+                idx = len(self.entries) - 1
+                self._stream_idx[key] = idx
+            self.entries[idx]["text"] += text
         self._dirty.set()
 
     def finish_stream(self):
@@ -385,6 +397,71 @@ class Screen:
         self._dirty.set()
 
 
+class Turns:
+    """Runs agent turns off the input thread, so the prompt stays live while the
+    model works. Messages typed in the meantime are queued and run in order.
+
+    `submit` returns the message's position in line (1 = starts immediately),
+    counted explicitly rather than from qsize(), which races with the worker.
+    """
+
+    def __init__(self, run, on_change=None):
+        self._run = run
+        self._on_change = on_change or (lambda n: None)
+        self._q = queue.Queue()
+        self._thread = None
+        self._lock = threading.Lock()
+        self._queued = 0                 # submitted but not yet started
+
+    def busy(self) -> bool:
+        t = self._thread
+        return t is not None and t.is_alive()
+
+    def pending(self) -> int:
+        with self._lock:
+            return self._queued
+
+    def submit(self, text: str) -> int:
+        with self._lock:
+            self._queued += 1
+            pos = self._queued
+            self._q.put(text)
+            start = not self.busy()
+            if start:
+                self._thread = threading.Thread(target=self._worker, daemon=True)
+                self._thread.start()
+        self._on_change(self.pending())
+        return pos
+
+    def clear(self) -> int:
+        n = 0
+        while True:
+            try:
+                self._q.get_nowait()
+                n += 1
+            except queue.Empty:
+                break
+        with self._lock:
+            self._queued = max(0, self._queued - n)
+        self._on_change(self.pending())
+        return n
+
+    def _worker(self):
+        while True:
+            try:
+                text = self._q.get_nowait()
+            except queue.Empty:
+                self._on_change(self.pending())
+                return
+            with self._lock:
+                self._queued = max(0, self._queued - 1)
+            self._on_change(self.pending())
+            try:
+                self._run(text)
+            except Exception as e:            # never kill the worker loop
+                print(f"\n[turn error] {e}")
+
+
 def cli():
     agent = Mahoraga(yolo="--yolo" in sys.argv)
     screen = Screen()
@@ -418,7 +495,7 @@ def cli():
         history = []
 
     COMMANDS = ["/help", "/quit", "/exit", "/q", "/new", "/provider",
-                "/model", "/tools", "/allow", "/memory", "/clear"]
+                "/model", "/tools", "/allow", "/memory", "/clear", "/stop"]
     model_cache = {"t": 0.0, "list": []}
 
     def completer(buf, cur):
@@ -486,7 +563,7 @@ def cli():
         screen.tool_result(result, dur)
         screen.kick()
 
-    def stream_reply(text):
+    def run_turn(text):
         screen.user_msg(text)
         screen.status = "thinking…"
         screen.finish_stream()
@@ -528,6 +605,10 @@ def cli():
         screen.say("")
         screen.kick()
 
+    # turns run on a worker thread so you can keep typing (and queue) while
+    # the model is working
+    turns = Turns(run_turn, on_change=lambda n: setattr(screen, "queued", n))
+
     while True:
         refresh_statusbar()
         try:
@@ -562,6 +643,7 @@ def cli():
             elif cmd == "/help":
                 screen.say(f"{BOLD}commands{R0}")
                 for h in ["/help            this", "/quit            exit",
+                          "/stop            drop queued messages (in-flight finishes)",
                           "/new             fresh context (memory keeps history)",
                           "/provider        list providers", "/provider <n>    switch provider",
                           "/model           list models (numbered)", "/model <n|name>  switch model",
@@ -576,7 +658,7 @@ def cli():
                           "/memory          recent stored messages",
                           "/clear           wipe stored memory"]:
                     screen.say(f"  {h}")
-                screen.say(f"{DIM}Ctrl+C stops a reply · ^C clears the line · "
+                screen.say(f"{DIM}type while it works — messages queue · ^C clears the line · "
                            f"Ctrl+O expands tool output · PgUp/PgDn scrolls · "
                            f"yolo: python -m mahoraga --yolo{R0}")
             elif cmd == "/new":
@@ -645,6 +727,9 @@ def cli():
                 agent.cfg["mouse"] = on
                 agent._save_config()
                 screen.say(f"{DIM}mouse {'on — wheel scrolls the pane, Shift+drag selects' if on else 'off — native select/copy works, PgUp/PgDn scroll'}{R0}")
+            elif cmd == "/stop":
+                dropped = turns.clear()
+                screen.say(f"{DIM}{'cleared ' + str(dropped) + ' queued message(s)' if dropped else 'queue is empty — the reply in flight will finish'}{R0}")
             elif cmd == "/pwd":
                 from ..plugins import shell_cwd
                 screen.say(f"{DIM}shell cwd: {shell_cwd()}{R0}")
@@ -681,7 +766,12 @@ def cli():
             screen.kick()
             continue
 
-        stream_reply(line)
+        if turns.busy():
+            n = turns.submit(line)
+            screen.say(f"{DIM}↳ queued #{n} — starts when the current reply finishes{R0}")
+            screen.kick()
+        else:
+            turns.submit(line)
 
 
 if __name__ == "__main__":
