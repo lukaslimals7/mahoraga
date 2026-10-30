@@ -124,6 +124,11 @@ class Screen:
         self.input_row = self.rows - 1
         self.sep_row = self.rows - 2
         self.busy = False               # True while the model works
+        self._ever_busy = False         # has a turn run yet? (sticky collapse)
+        # "sticky" = shrink at the first reply and stay small until restart,
+        # "auto"   = shrink while streaming, grow back when idle,
+        # "full"   = always the big banner, or an int = that many rows.
+        self.wheel_setting = "sticky"
         self.wheel_h = 2 if self.compact else _wheel_height(self.rows, self.compact)
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
@@ -331,13 +336,41 @@ class Screen:
         sys.stdout.flush()
 
     def _wheel_rows(self) -> int:
-        """How many rows the banner may take. While a reply streams it collapses
-        to a two-line banner so the transcript gets the room instead."""
+        """How many rows the banner takes.
+
+        sticky — collapses on the first reply and stays collapsed for the rest of
+                 the session (it comes back when Mahoraga is restarted)
+        auto   — collapses only while a reply is streaming
+        full   — always the full banner
+        int    — exactly that many rows (2..28)
+        """
         if self.compact:
             return 2
-        if self.busy:
-            return 4
-        return _wheel_height(self.rows, self.compact)
+        full = _wheel_height(self.rows, self.compact)
+        setting = self.wheel_setting
+        if isinstance(setting, int):
+            return max(2, min(28, setting))
+        if setting == "full":
+            return full
+        if setting == "auto":
+            return 4 if self.busy else full
+        # sticky (default): once the first reply starts, stay small
+        return 4 if (self.busy or self._ever_busy) else full
+
+    def set_wheel(self, setting) -> str:
+        """Change the banner size now, without waiting for a turn."""
+        self.wheel_setting = setting
+        self.resize_pending.set()
+        self._dirty.set()
+        return self.wheel_label()
+
+    def wheel_label(self) -> str:
+        s = self.wheel_setting
+        if isinstance(s, int):
+            return f"{s} rows"
+        return {"sticky": "sticky (stays small after the first reply)",
+                "auto": "auto (grows back when the reply ends)",
+                "full": "full banner"}.get(s, str(s))
 
     def set_busy(self, busy: bool) -> None:
         """Busy changes the layout (the wheel shrinks). The relayout itself is
@@ -345,6 +378,8 @@ class Screen:
         if busy == self.busy:
             return
         self.busy = busy
+        if busy:
+            self._ever_busy = True
         self.resize_pending.set()
         self._dirty.set()
 
@@ -771,6 +806,7 @@ def cli():
                           "/cd <path>       change the shell working dir (persists)",
                           "/pwd             where the shell runs",
                           "/reasoning on|off show or hide the model's thinking",
+                          "/wheel           banner size: sticky | auto | full | <rows>",
                           "/mouse on|off    wheel-scroll the pane (off = native copy/paste)",
                           "/memory          recent stored messages",
                           "/clear           wipe stored memory"]:
@@ -844,6 +880,22 @@ def cli():
                 agent.cfg["mouse"] = on
                 agent._save_config()
                 screen.say(f"{DIM}mouse {'on — wheel scrolls the pane, Shift+drag selects' if on else 'off — native select/copy works, PgUp/PgDn scroll'}{R0}")
+            elif cmd == "/wheel":
+                w = arg.lower().strip()
+                if not w:
+                    screen.say(f"{DIM}banner: {screen.wheel_label()}{R0}")
+                    screen.say(f"{DIM}/wheel sticky  shrink on the first reply, stay small "
+                               f"(back on restart){R0}")
+                    screen.say(f"{DIM}/wheel auto    shrink only while a reply streams{R0}")
+                    screen.say(f"{DIM}/wheel full    always the big banner{R0}")
+                    screen.say(f"{DIM}/wheel 6       exactly that many rows (2-28){R0}")
+                elif w in ("sticky", "auto", "full"):
+                    screen.say(f"{DIM}banner: {screen.set_wheel(w)}{R0}")
+                elif w.isdigit() and 2 <= int(w) <= 28:
+                    screen.say(f"{DIM}banner: {screen.set_wheel(int(w))}{R0}")
+                else:
+                    screen.say(f"{RED}usage: /wheel sticky|auto|full|<2-28>{R0}")
+                screen.kick()
             elif cmd == "/stop":
                 dropped = turns.clear()
                 was_running = turns.busy()

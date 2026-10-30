@@ -33,8 +33,10 @@ That's the whole design. The core loop is ~50 lines; everything else is the part
   same and clears the queue.
 - **Reasoning on/off** — `/reasoning off` hides the thinking block and asks the backend to skip it;
   the setting persists in `config.json`.
-- **The wheel yields to the transcript** — while a reply streams the banner collapses to two lines so
-  the pane gets the rows, then returns when it's done.
+- **The wheel yields to the transcript** — on the first reply the banner collapses from 22 rows to
+  4 and *stays* small, because after that the transcript is what you're reading. It comes back when
+  you restart. Prefer the old behaviour, or a specific size? `/wheel auto`, `/wheel full`,
+  `/wheel 8`.
 - **Copy/paste friendly** — `/mouse off` restores native terminal selection; `/mouse on` gives the wheel-scroll behaviour back.
 - **Persistent history + tab completion** — arrow through 500 previous prompts; `Tab` completes commands, provider names, model numbers and allowlist indices.
 - **Resize-safe** — every region recomputes on `SIGWINCH` instead of smearing.
@@ -101,6 +103,7 @@ python3 -m mahoraga
 | `/allow` | list allowlist rules; `/allow <regex>` add; `/allow rm <n>` remove |
 | `/stop` | stop the reply in flight and drop the queue |
 | `/reasoning on\|off` | show/hide the model's thinking (persisted) |
+| `/wheel` | banner size: `sticky` (default) · `auto` · `full` · a row count (2–28) |
 | `/new` | fresh context, history kept |
 | `/memory` | recent stored turns |
 | `/clear` | wipe stored memory |

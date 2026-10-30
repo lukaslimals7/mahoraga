@@ -51,12 +51,40 @@ s.tool_result("\x1b[2J\x1b[1;1H\x1b[31mred\x1b[0m output", 0.1)
 render = "\n".join(t for _, t in s._wrapped())
 assert "\x1b[2J" not in render and "\x1b[1;1H" not in render, "escape leaked into the pane"
 
-# ---- the wheel gives rows back while busy ----------------------------------
+# ---- the wheel gives rows back, and stays small in the default mode --------
 s.rows, s.cols = 50, 120
-s.busy = False
-idle_rows = s._wheel_rows()
-s.busy = True
-busy_rows = s._wheel_rows()
-assert busy_rows < idle_rows, (busy_rows, idle_rows)
-assert busy_rows == 4, busy_rows
-print(f"stream order + sanitising + wheel shrink OK (wheel {idle_rows} -> {busy_rows} rows)")
+s.compact = False
+
+# default is sticky: full at launch, small from the first reply onwards
+assert s.wheel_setting == "sticky"
+full_rows = s._wheel_rows()
+assert full_rows > 4, full_rows
+
+s.set_busy(True)                       # first reply starts
+during = s._wheel_rows()
+s.set_busy(False)                      # ...and ends
+after = s._wheel_rows()
+
+assert during == 4, during
+assert after == 4, f"sticky should not grow back after the reply (got {after})"
+assert during < full_rows
+
+# auto grows back when idle
+s.set_wheel("auto")
+assert s._wheel_rows() == full_rows, "auto should restore the banner when idle"
+s.set_busy(True)
+assert s._wheel_rows() == 4
+s.set_busy(False)
+assert s._wheel_rows() == full_rows
+
+# full never shrinks, an int is an exact size
+s.set_wheel("full")
+s.set_busy(True)
+assert s._wheel_rows() == full_rows
+s.set_busy(False)
+s.set_wheel(8)
+assert s._wheel_rows() == 8
+s.set_wheel("sticky")
+
+print(f"stream order + sanitising + wheel OK "
+      f"(full {full_rows} rows -> {during} during/after a reply in sticky mode)")
