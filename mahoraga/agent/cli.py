@@ -40,6 +40,12 @@ def _md(s: str, width: int = 100, tables: bool = True) -> str:
     `tables=False` for raw program output, where `|` may be real data."""
     return md_render(s, width, tables)
 
+# A visible cursor is not necessarily a blinking one: terminals remember the
+# last DECSCUSR they were given, and several profiles ship a steady block. Ask
+# for a blinking bar at the prompt, and hand the default back on exit.
+CURSOR_BLINK = "\033[?12h\033[5 q"
+CURSOR_DEFAULT = "\033[?12l\033[0 q"
+
 ALT_ON = "\033[?1049h"
 ALT_OFF = "\033[?1049l"
 NOWRAP = "\033[?7l"      # never autowrap: layout can't be shifted by long lines
@@ -235,7 +241,8 @@ class Screen:
         if self._saved_tty is not None:
             restore(sys.stdin.fileno(), self._saved_tty)
         sys.stdout.write("\033[?1006l\033[?1000l"
-                         + R0 + SHOW_CURSOR + WRAP_ON + ALT_OFF + RESET)
+                         + R0 + CURSOR_DEFAULT + SHOW_CURSOR
+                         + WRAP_ON + ALT_OFF + RESET)
         sys.stdout.flush()
 
     # ---- painting ----
@@ -552,7 +559,7 @@ class Screen:
                             on_follow=self.scroll_follow,
                             on_expand=on_expand,
                             on_interrupt=on_interrupt)
-        sys.stdout.write(SHOW_CURSOR)
+        sys.stdout.write(SHOW_CURSOR + CURSOR_BLINK)
         sys.stdout.flush()
         try:
             line = editor.read(prompt)
