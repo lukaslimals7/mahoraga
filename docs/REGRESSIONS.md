@@ -7,6 +7,15 @@ reappearing, and each one looked like "the terminal is broken".
 **Standing rule:** a change is not done until the existing tests still pass. Add a
 test for anything new; if a fix has no test, it will regress.
 
+**Adding a fix — three steps, in this order:**
+
+1. **Pin the current behaviour first.** If the thing you're about to touch has no
+   test, write one that passes *today*. Then change the code and watch it still pass.
+2. **Fix, then add a row here** with the symptom in the user's words ("the output
+   gets scrambled"), the real cause, and the guard.
+3. **`./run-tests.sh`** — one command, one exit code. `tests/test_ledger.py` fails if
+   a row names a test that doesn't exist.
+
 | # | Symptom | Cause | Fix | Guarded by |
 |---|---|---|---|---|
 | 1 | Wheel looked "pressed and compressed" | Art is parametric (`rx = w*0.285`, `ry = h*0.245`), so shape follows the w/h ratio; height was shrunk while width stayed fixed | Scale both axes from `_WHEEL_ASPECT`, and never render below the 21-row design height | `test_stream_order.py` (wheel modes) |
@@ -22,7 +31,7 @@ test for anything new; if a fix has no test, it will regress.
 | 11 | `/cd`, `/pwd`, `/mouse`, `/reasoning`, `/wheel` invisible to Tab | `COMMANDS` was a second, hand-maintained list that drifted from the dispatcher | one `COMMAND_SPEC` table feeds completion, `/help`, and a drift test | `test_commands.py` |
 | 12 | Tab froze the prompt on `/model ` | completion called `available_models()`, which does a server round-trip on the input thread | `model_names_cached()` — config + current only; discovery stays on `/model refresh` | `test_commands.py` |
 | 13 | A worker error printed over the UI | `print()` in `Turns._worker` writes into an absolutely-addressed screen | report into the pane; the worker only re-raises to `run_turn` | code review |
-| 14 | Cursor sat still (no blink) | Only shown/hidden (`?25h`/`?25l`); terminals keep whatever DECSCUSR they were last given | `CURSOR_BLINK` (`?12h`, `5 q`) at the prompt, `CURSOR_DEFAULT` on exit | pty capture (`test` in `probe_cursor`) |
+| 14 | Cursor sat still (no blink) | Only shown/hidden (`?25h`/`?25l`); terminals keep whatever DECSCUSR they were last given | `CURSOR_BLINK` (`?12h`, `5 q`) at the prompt, `CURSOR_DEFAULT` on exit | `test_cursor.py` |
 
 ## Testing a TUI change
 
