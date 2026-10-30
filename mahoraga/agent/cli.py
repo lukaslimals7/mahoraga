@@ -69,6 +69,63 @@ def _clean(text: str) -> str:
     return "".join(ch for ch in t if ch in "\n\t" or ord(ch) >= 0x20)
 
 
+# ---- commands: ONE table, used by completion, /help and the drift test -----
+# Completing from a hand-maintained list is how /cd, /pwd, /mouse, /reasoning
+# and /wheel ended up invisible to Tab. Add a command here and it is complete
+# everywhere; tests/test_commands.py fails if a dispatch branch has no entry.
+COMMAND_SPEC: list[tuple[str, str, str]] = [
+    ("/help", "", "this"),
+    ("/quit", "", "exit"),
+    ("/new", "", "fresh context (memory keeps history)"),
+    ("/stop", "", "stop the reply in flight + drop the queue"),
+    ("/provider", "[name]", "list providers / switch"),
+    ("/model", "[n|name|refresh]", "list models (numbered) / switch"),
+    ("/tools", "on|off", "list tools / enable or disable them"),
+    ("/reasoning", "on|off", "show or hide the model's thinking"),
+    ("/wheel", "sticky|auto|full|<rows>", "banner size"),
+    ("/allow", "[regex|rm <n>]", "list / whitelist / remove a rule"),
+    ("/cd", "<path>", "change the shell working dir (persists)"),
+    ("/pwd", "", "where the shell runs"),
+    ("/mouse", "on|off", "wheel-scroll the pane (off = native copy/paste)"),
+    ("/memory", "", "recent stored messages"),
+    ("/clear", "", "wipe stored memory"),
+]
+# Fixed candidate words per command — data, so it can be tested and cannot drift
+# silently the way the old inline branch chain did.
+STATIC_ARG_POOL: dict[str, list[str]] = {
+    "/reasoning": ["on", "off"],
+    "/mouse": ["on", "off"],
+    "/tools": ["on", "off"],
+    "/wheel": ["sticky", "auto", "full"],
+    "/allow": ["rm"],
+}
+COMMAND_ALIASES = {"/exit": "/quit", "/q": "/quit"}
+COMMAND_NAMES = [name for name, _, _ in COMMAND_SPEC] + list(COMMAND_ALIASES)
+
+
+def complete_line(buf: str, cur: int, names: list[str], arg_pool) -> tuple | None:
+    """Tab completion for one prompt line.
+
+    Before the first space: command names. After it: whatever `arg_pool(cmd)`
+    returns. Pure, so tests drive it without a terminal.
+    """
+    try:
+        head = buf[:cur]
+        if not head.startswith("/"):
+            return None
+        if " " not in head:
+            return complete(buf, cur, names, 0)
+        cmd, _, rest = head.partition(" ")
+        if cmd == "/allow" and rest.startswith("rm "):
+            return complete(buf, cur, arg_pool("/allow rm"), len("/allow rm "))
+        pool = arg_pool(cmd)
+        if not pool:
+            return None
+        return complete(buf, cur, pool, len(cmd) + 1)
+    except Exception:
+        return None      # Tab doing nothing beats Tab killing the prompt
+
+
 def vis_len(s: str) -> int:
     return len(_ANSI.sub("", s))
 
@@ -627,31 +684,44 @@ def cli():
                 "/model", "/tools", "/allow", "/memory", "/clear", "/stop"]
     model_cache = {"t": 0.0, "list": []}
 
-    def completer(buf, cur):
-        head = buf[:cur]
-        if head.startswith("/model "):
+    def arg_pool(cmd: str) -> list[str]:
+        """Candidate words for a command's first argument. Never touches the
+        network — completion runs on the input thread and must not freeze it."""
+        static = STATIC_ARG_POOL.get(cmd)
+        if static:
+            return list(static)
+        if cmd == "/provider":
+            return agent.provider_names()
+        if cmd == "/model":
             if time.time() - model_cache["t"] > 30:
-                model_cache["list"] = agent.available_models()
+                model_cache["list"] = agent.model_names_cached()
                 model_cache["t"] = time.time()
-            pool = model_cache["list"]
-        elif head.startswith("/provider "):
-            pool = agent.provider_names()
-        elif head.startswith("/tools "):
-            pool = ["off", "on"]
-        elif head.startswith("/allow rm "):
+            return model_cache["list"]
+        if cmd == "/allow rm":
             from ..policy import permissions as _perm
-            pool = [str(i) for i in range(1, len(_perm.list_allow()) + 1)]
-        elif head.startswith("/allow "):
-            pool = ["rm"]
-        elif " " not in head and head.startswith("/"):
-            pool = COMMANDS
-        else:
+            return [str(i) for i in range(1, len(_perm.list_allow()) + 1)]
+        return []
+
+    def completer(buf, cur):
+        """Tab completion. Wrapped so a bad command can never break the editor."""
+        try:
+            return complete_line(buf, cur, COMMAND_NAMES, arg_pool)
+        except Exception:
             return None
-        pre, _, _word = head.partition(" ")
-        return complete(buf, cur, pool, len(pre) + 1 if " " in head else 0)
+
+    _shown = {"key": None}
 
     def on_options(matches):
-        screen.say(f"{DIM}{'  '.join(matches[:15])}{R0}")
+        """Show the candidates in columns, once per distinct set."""
+        key = tuple(matches)
+        if _shown["key"] == key:
+            return
+        _shown["key"] = key
+        cols = 6 if len(matches) > 8 else len(matches)
+        width = max(len(m) for m in matches) + 2
+        for i in range(0, len(matches), cols):
+            row = "".join(f"{m:<{width}}" for m in matches[i:i + cols]).rstrip()
+            screen.say(f"  {DIM}{row}{R0}")
         screen.kick()
 
     # ---- status bar contents: cwd (branch) + (provider) model ----
@@ -793,25 +863,11 @@ def cli():
                 break
             elif cmd == "/help":
                 screen.say(f"{BOLD}commands{R0}")
-                for h in ["/help            this", "/quit            exit",
-                          "/stop            stop the reply in flight + drop the queue",
-                          "/new             fresh context (memory keeps history)",
-                          "/provider        list providers", "/provider <n>    switch provider",
-                          "/model           list models (numbered)", "/model <n|name>  switch model",
-                          "/model refresh   re-query the server's model list",
-                          "/tools           list tools", "/tools off|on    disable/enable tools",
-                          "/allow           list whitelisted commands",
-                          "/allow <regex>   whitelist a command (runs without asking)",
-                          "/allow rm <n>    remove a whitelist rule",
-                          "/cd <path>       change the shell working dir (persists)",
-                          "/pwd             where the shell runs",
-                          "/reasoning on|off show or hide the model's thinking",
-                          "/wheel           banner size: sticky | auto | full | <rows>",
-                          "/mouse on|off    wheel-scroll the pane (off = native copy/paste)",
-                          "/memory          recent stored messages",
-                          "/clear           wipe stored memory"]:
-                    screen.say(f"  {h}")
-                screen.say(f"{DIM}type while it works — messages queue · ^C clears the line · "
+                for name, hint, desc in COMMAND_SPEC:
+                    left = f"{name} {hint}".strip()
+                    screen.say(f"  {left:<30}{desc}")
+                screen.say(f"  {DIM}aliases: /exit, /q{R0}")
+                screen.say(f"{DIM}type while it works — messages queue · ^C stops the reply · "
                            f"Ctrl+O expands tool output · PgUp/PgDn scrolls · "
                            f"yolo: python -m mahoraga --yolo{R0}")
             elif cmd == "/new":

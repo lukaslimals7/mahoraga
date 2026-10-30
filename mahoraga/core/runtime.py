@@ -188,6 +188,17 @@ class Mahoraga:
             return curated or [self.provider.model]
         return curated or [self.provider.model]
 
+    def model_names_cached(self) -> list[str]:
+        """Model names for tab-completion: config + current only, no network.
+        Completion runs on the input thread; a discovery call here would freeze
+        the prompt for as long as the server takes to answer."""
+        pcfg = self.active_cfg()
+        names = [m for m in (pcfg.get("models") or []) if isinstance(m, str)]
+        cur = pcfg.get("model") or getattr(self.provider, "model", "")
+        if cur and cur not in names:
+            names.insert(0, cur)
+        return names
+
     def resolve_model(self, arg: str) -> str | None:
         """`/model <arg>` → a model id. A number picks from the current list."""
         arg = (arg or "").strip()
