@@ -31,6 +31,7 @@ test for anything new; if a fix has no test, it will regress.
 | 11 | `/cd`, `/pwd`, `/mouse`, `/reasoning`, `/wheel` invisible to Tab | `COMMANDS` was a second, hand-maintained list that drifted from the dispatcher | one `COMMAND_SPEC` table feeds completion, `/help`, and a drift test | `test_commands.py` |
 | 12 | Tab froze the prompt on `/model ` | completion called `available_models()`, which does a server round-trip on the input thread | `model_names_cached()` — config + current only; discovery stays on `/model refresh` | `test_commands.py` |
 | 13 | A worker error printed over the UI | `print()` in `Turns._worker` writes into an absolutely-addressed screen | report into the pane; the worker only re-raises to `run_turn` | code review |
+| 15 | Cursor parked **under the banner**, not on the prompt row | the slim wheel branch saved the cursor (`\033[s`) but never restored it, so each 80 ms repaint left it at row 4 and the later paints restored *to that* | restore at the end of the slim branch too | `test_cursor_position.py` |
 | 14 | Cursor sat still (no blink) | Only shown/hidden (`?25h`/`?25l`); terminals keep whatever DECSCUSR they were last given | `CURSOR_BLINK` (`?12h`, `5 q`) at the prompt, `CURSOR_DEFAULT` on exit | `test_cursor.py` |
 
 ## Testing a TUI change

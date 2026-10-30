@@ -258,6 +258,7 @@ class Screen:
                 out.append(_at(2) + f" {DIM}{label}{R0}\033[K")
             for r in range(3, self.wheel_h + 1):
                 out.append(_at(r) + "\033[2K")
+            out.append("\033[u")   # hand the cursor back to the prompt row
         else:
             # The art's shape comes from the w/h ratio (rx = w*0.285, ry = h*0.245),
             # so shrinking height alone squashes the wheel. Keep the designed
