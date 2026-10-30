@@ -5,8 +5,8 @@ Streams SSE deltas when asked (the responsive path), and turns ugly HTTP errors
 into readable ones with the server's own message.
 """
 from __future__ import annotations
-import json, urllib.request, urllib.error
-from .provider import LLMProvider, ChatResponse, tool_call_from_raw
+import json, threading, urllib.request, urllib.error
+from .provider import LLMProvider, ChatResponse, tool_call_from_raw, Cancelled
 
 class LLMError(Exception):
     """A readable provider failure — the server's message, not a traceback.
@@ -77,6 +77,19 @@ class OpenAICompat(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self._cancel = threading.Event()
+        self._active = None          # the live response object, for cancel()
+
+    def cancel(self) -> None:
+        """Stop the current stream: flag it, and close the socket so a stalled
+        read unblocks instead of waiting for the server to send another byte."""
+        self._cancel.set()
+        resp, self._active = self._active, None
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}
@@ -170,7 +183,8 @@ class OpenAICompat(LLMProvider):
         return False
 
     def chat(self, messages, tools=None, stream=False,
-             on_delta=None, on_reason=None) -> ChatResponse:
+             on_delta=None, on_reason=None, reasoning: bool = True) -> ChatResponse:
+        self._cancel.clear()
         body = {
             "model": self.model,
             "messages": messages,
@@ -180,6 +194,11 @@ class OpenAICompat(LLMProvider):
         }
         if tools:
             body["tools"] = _sanitize_schema(tools)
+        if not reasoning:
+            # Qwen/llama.cpp templates read this; servers that don't know the
+            # field ignore it. Anything that ignores it simply still thinks —
+            # the TUI hides the reasoning stream either way.
+            body["chat_template_kwargs"] = {"enable_thinking": False}
 
         if not body["stream"]:
             with self._chat_post(body) as resp:
@@ -198,43 +217,57 @@ class OpenAICompat(LLMProvider):
         tc_frag: dict[int, dict] = {}
         usage = {}
         with self._chat_post(body) as resp:
-            for raw in resp:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                except Exception:
-                    continue
-                if chunk.get("usage"):
-                    usage = chunk["usage"]
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
+            self._active = resp
+            try:
+                for raw in resp:
+                    if self._cancel.is_set():
+                        raise Cancelled()
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except Exception:
+                        continue
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    choice = (chunk.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
 
-                think = delta.get("reasoning_content")
-                if think:
-                    think_parts.append(think)
-                    if on_reason:
-                        on_reason(think)
+                    think = delta.get("reasoning_content")
+                    if think:
+                        think_parts.append(think)
+                        if on_reason:
+                            on_reason(think)
 
-                piece = delta.get("content")
-                if piece:
-                    content_parts.append(piece)
-                    on_delta(piece)
+                    piece = delta.get("content")
+                    if piece:
+                        content_parts.append(piece)
+                        on_delta(piece)
 
-                for tcf in delta.get("tool_calls") or []:
-                    idx = tcf.get("index", 0)
-                    slot = tc_frag.setdefault(idx, {"id": "", "name": "", "args": ""})
-                    if tcf.get("id"):
-                        slot["id"] = tcf["id"]
-                    fn = tcf.get("function") or {}
-                    if fn.get("name"):
-                        slot["name"] += fn["name"]
-                    if fn.get("arguments"):
-                        slot["args"] += fn["arguments"]
+                    for tcf in delta.get("tool_calls") or []:
+                        idx = tcf.get("index", 0)
+                        slot = tc_frag.setdefault(idx, {"id": "", "name": "", "args": ""})
+                        if tcf.get("id"):
+                            slot["id"] = tcf["id"]
+                        fn = tcf.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            slot["args"] += fn["arguments"]
+            except Exception:
+                # Dragging the socket out from under a blocking read surfaces as
+                # OSError, ValueError or AttributeError depending on how far the
+                # reader got. Whatever it is: if the user asked to stop, it was
+                # a stop; otherwise it is a real failure.
+                if self._cancel.is_set():
+                    raise Cancelled() from None
+                raise
+            finally:
+                self._active = None
 
         tool_calls = []
         for idx in sorted(tc_frag):

@@ -18,6 +18,7 @@ from __future__ import annotations
 import sys, threading, time, json, re, shutil, queue
 
 from ..core.runtime import Mahoraga
+from ..llm.provider import Cancelled
 from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
 from ..policy import approval
 from .lineedit import LineEditor, complete, set_raw, restore
@@ -45,6 +46,27 @@ NOWRAP = "\033[?7l"      # never autowrap: layout can't be shifted by long lines
 WRAP_ON = "\033[?7h"
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+_ANSI_FULL = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"            # CSI: colours, cursor moves, clears
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC: window titles, hyperlinks
+    r"|\x1b[@-Z\\-_]"                       # two-character escapes
+)
+
+
+def _clean(text: str) -> str:
+    """Strip escapes and control characters from text we did not author.
+
+    Command output (ls --color, apt, nmap) carries cursor-addressed escapes.
+    Printed verbatim into an absolutely-addressed pane they repaint other rows —
+    that is the scrambled screen. Nothing we render may carry an escape we did
+    not put there ourselves.
+    """
+    if not text:
+        return ""
+    t = _ANSI_FULL.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    return "".join(ch for ch in t if ch in "\n\t" or ord(ch) >= 0x20)
 
 
 def vis_len(s: str) -> int:
@@ -101,7 +123,8 @@ class Screen:
         self.status_row = self.rows
         self.input_row = self.rows - 1
         self.sep_row = self.rows - 2
-        self.wheel_h = _wheel_height(self.rows, self.compact)
+        self.busy = False               # True while the model works
+        self.wheel_h = 2 if self.compact else _wheel_height(self.rows, self.compact)
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
         self.entries: list[dict] = []    # blocks: user/think/answer/note/tool
@@ -114,9 +137,9 @@ class Screen:
         self.queued = 0                     # messages waiting behind the current turn
         self._frame = 0
         self._saved_tty = None
-        self.busy = False               # True while the model works
         self.mouse = False              # /mouse on enables wheel + tracking
-        self.scroll_top: int | None = None   # first visible pane line; None = follow tail
+        self.scroll_off = 0             # rows scrolled back from the tail; 0 = follow
+        self._last_total = None         # row count at the previous paint (anchoring)
         self.status = "ready"
         self.status_left_extra = ""     # cwd (branch), set by cli()
         self.status_right_extra = ""    # (provider) model, set by cli()
@@ -157,11 +180,15 @@ class Screen:
 
     def _paint_wheel(self):
         out = ["\033[s"]          # save cursor: painting must never steal it
-        if self.compact:
+        if self.compact or self.wheel_h < 8:
             glyphs = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
             g = glyphs[self._frame % len(glyphs)]
             out.append(_at(1) + f" {GOLD}{g} MAHORAGA{R0}\033[K")
-            out.append(_at(2) + f" {DIM}{self.status}{R0}\033[K")
+            if self.wheel_h >= 2:
+                label = self.status + ("  ·  ctrl+c stops" if self.busy else "")
+                out.append(_at(2) + f" {DIM}{label}{R0}\033[K")
+            for r in range(3, self.wheel_h + 1):
+                out.append(_at(r) + "\033[2K")
         else:
             # The art's shape comes from the w/h ratio (rx = w*0.285, ry = h*0.245),
             # so shrinking height alone squashes the wheel. Keep the designed
@@ -201,36 +228,38 @@ class Screen:
         rows: list[tuple[str, str]] = []
         for e in self.entries:
             k = e.get("kind", "note")
+            txt = _clean(e.get("text", ""))
             if k == "note":
                 color = e.get("color", "")
                 rows += [("", (color + w) if color else w)
-                         for w in self._wrap_plain(e["text"], W)]
+                         for w in self._wrap_plain(txt, W)]
             elif k == "user":
                 rows.append(("", ""))
                 rows += [(BG_USER, w) for w in
-                         self._wrap_plain(e["text"], self.cols - 4, INK)]
+                         self._wrap_plain(txt, self.cols - 4, INK)]
                 rows.append(("", ""))
             elif k == "think":
                 rows += [("", w) for w in
-                         self._wrap_plain(_md(e["text"], W), W, DIM + ITAL)]
+                         self._wrap_plain(_md(txt, W), W, DIM + ITAL)]
                 rows.append(("", ""))
             elif k == "answer":
                 rows += [("", w) for w in
-                         self._wrap_plain(_md(e["text"], W), W, INK)]
+                         self._wrap_plain(_md(txt, W), W, INK)]
                 rows.append(("", ""))
             elif k == "tool":
                 rows.append(("", ""))
-                meta = f" {DIM}({e['meta']})" if e.get("meta") else ""
-                rows.append((BG_TOOL, f"{GRTXT}$ {_md(e['head'], tables=False)}{meta}"))
+                meta = f" {DIM}({_clean(str(e['meta']))})" if e.get("meta") else ""
+                rows.append((BG_TOOL,
+                             f"{GRTXT}$ {_md(_clean(str(e['head'])), tables=False)}{meta}"))
                 rows.append((BG_TOOL, ""))
                 if e.get("out") is None:
                     body = [f"{DIM}running…"]
                 else:
-                    out_lines = _md(e["out"], self.cols - 4,
-                                    tables=False).splitlines() or ["(no output)"]
-                    if len(out_lines) > 10 and not self.expand_tools:
-                        out_lines = [f"{DIM}… ({len(out_lines) - 10} earlier "
-                                     f"lines, ctrl+o to expand)"] + out_lines[-10:]
+                    out_lines = _md(_clean(str(e["out"])), self.cols - 4,
+                                    tables=False).rstrip().splitlines() or ["(no output)"]
+                    if len(out_lines) > 14 and not self.expand_tools:
+                        out_lines = [f"{DIM}… ({len(out_lines) - 14} earlier "
+                                     f"lines, ctrl+o to expand)"] + out_lines[-14:]
                     body = [GRTXT + l for l in out_lines]
                     if e.get("dur") is not None:
                         body.append(f"{DIM}Took {e['dur']:.1f}s")
@@ -242,22 +271,33 @@ class Screen:
 
     def _paint_pane(self):
         all_lines = self._wrapped()
-        max_top = max(0, len(all_lines) - self.pane_h)
-        start = max_top if self.scroll_top is None \
-            else max(0, min(self.scroll_top, max_top))
+        total = len(all_lines)
+        max_off = max(0, total - self.pane_h)
+        # While the reader is scrolled up, new rows land at the bottom. Grow the
+        # offset by the same amount so the view holds still on the lines being
+        # read — an absolute index drifts while streaming and jumps on resize.
+        if (self.scroll_off > 0 and self._last_total is not None
+                and total > self._last_total):
+            self.scroll_off = min(max_off, self.scroll_off + (total - self._last_total))
+        self._last_total = total
+        self.scroll_off = max(0, min(self.scroll_off, max_off))
+        start = max(0, total - self.pane_h - self.scroll_off)
         lines = all_lines[start:start + self.pane_h]
         out = ["\033[s"]
         for i in range(self.pane_h):
             row = self.pane_top + i
+            # Erase the WHOLE line (2K) before drawing: a band from the previous
+            # frame otherwise survives behind a now-plain row, which reads as
+            # overlapping blocks after a scroll or a resize.
+            cell = [_at(row) + R0 + "\033[2K"]
             if i < len(lines):
                 bg, text = lines[i]
                 if bg:   # band rows: fill the full width with the background
                     pad = " " * max(0, self.cols - 1 - vis_len(text))
-                    out.append(_at(row) + bg + text + pad + R0 + "\033[K")
+                    cell.append(bg + text + pad + R0 + "\033[K")
                 else:
-                    out.append(_at(row) + f"{text}{R0}\033[K")
-            else:
-                out.append(_at(row) + "\033[K")
+                    cell.append(f"{text}{R0}\033[K")
+            out.append("".join(cell))
         out.append("\033[u")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
@@ -273,7 +313,7 @@ class Screen:
             extra = f" · +{self.queued} queued" if self.queued else ""
             state = f"{GOLD}{g} {self.status}{extra} · /stop clears{R0}"
             plain = f"{self.status}{extra} · /stop clears"
-        elif self.scroll_top is not None:
+        elif self.scroll_off > 0:
             state = f"{GOLD}scrolled up · PgDn to follow{R0}"
             plain = "scrolled up · PgDn to follow"
         else:
@@ -290,6 +330,24 @@ class Screen:
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
+    def _wheel_rows(self) -> int:
+        """How many rows the banner may take. While a reply streams it collapses
+        to a two-line banner so the transcript gets the room instead."""
+        if self.compact:
+            return 2
+        if self.busy:
+            return 4
+        return _wheel_height(self.rows, self.compact)
+
+    def set_busy(self, busy: bool) -> None:
+        """Busy changes the layout (the wheel shrinks). The relayout itself is
+        handed to the render thread — only it paints stdout."""
+        if busy == self.busy:
+            return
+        self.busy = busy
+        self.resize_pending.set()
+        self._dirty.set()
+
     def relayout(self):
         """Terminal resized: recompute every region and repaint from scratch.
         Without this, regions keep their old row numbers and text lands in
@@ -300,9 +358,12 @@ class Screen:
         self.status_row = self.rows
         self.input_row = self.rows - 1
         self.sep_row = self.rows - 2
-        self.wheel_h = _wheel_height(self.rows, self.compact)
+        self.wheel_h = self._wheel_rows()
         self.pane_top = self.wheel_h + 1
         self.pane_h = max(3, self.sep_row - 1 - self.wheel_h)
+        max_off = max(0, len(self._wrapped()) - self.pane_h)
+        self.scroll_off = min(self.scroll_off, max_off)   # keep the reader's place
+        self._last_total = None
         sys.stdout.write("\033[2J")        # wipe, then repaint absolutely
         self._dirty.set()
         self._paint_wheel()
@@ -339,6 +400,10 @@ class Screen:
 
     def tool_call(self, head: str, meta: str = "") -> int:
         with self._lock:
+            # The model's next sentence belongs AFTER this card. Without this
+            # reset the old stream index is reused and the answer is appended to
+            # the block above the command — the "output on top of commands" bug.
+            self._stream_idx = {}
             self.entries.append({"kind": "tool", "head": head, "meta": meta,
                                  "out": None, "dur": None})
             idx = len(self.entries) - 1
@@ -385,14 +450,16 @@ class Screen:
         sys.stdout.flush()
 
     def input_line(self, prompt: str, history: list | None = None,
-                   completer=None, on_options=None, on_expand=None) -> str:
+                   completer=None, on_options=None, on_expand=None,
+                   on_interrupt=None) -> str:
         """Bottom-row prompt with line editing: arrows, history (UP/DOWN),
         tab completion. The wheel keeps spinning above it."""
         editor = LineEditor(self._redraw_input, history=history,
                             completer=completer, on_options=on_options,
                             on_scroll=self.scroll_by,
                             on_follow=self.scroll_follow,
-                            on_expand=on_expand)
+                            on_expand=on_expand,
+                            on_interrupt=on_interrupt)
         sys.stdout.write(SHOW_CURSOR)
         sys.stdout.flush()
         try:
@@ -406,17 +473,16 @@ class Screen:
         return line
 
     def scroll_by(self, step: int):
-        """Pane scrollback: +step = newer, -step = older. Reaching the bottom
-        re-enables live follow."""
+        """Pane scrollback: +step = newer, -step = older. Reaching the tail
+        (offset 0) re-enables live follow."""
         total = len(self._wrapped())
-        max_top = max(0, total - self.pane_h)
-        top = max_top if self.scroll_top is None else self.scroll_top
-        top = max(0, min(top + step, max_top))
-        self.scroll_top = None if top >= max_top else top
+        max_off = max(0, total - self.pane_h)
+        self.scroll_off = max(0, min(self.scroll_off - step, max_off))
+        self._last_total = total
         self._dirty.set()
 
     def scroll_follow(self):
-        self.scroll_top = None
+        self.scroll_off = 0
         self._dirty.set()
 
     def kick(self):
@@ -484,8 +550,10 @@ class Turns:
             self._on_change(self.pending())
             try:
                 self._run(text)
-            except Exception as e:            # never kill the worker loop
-                print(f"\n[turn error] {e}")
+            except Exception:                 # never kill the worker loop
+                # print() here would corrupt the absolutely-addressed screen;
+                # run_turn already reports the failure into the pane
+                pass
 
 
 def cli():
@@ -572,7 +640,8 @@ def cli():
         short = cwd.replace(str(pathlib.Path.home()), "~", 1)
         branch = _git_branch(cwd)
         screen.status_left_extra = f"{short} ({branch})" if branch else short
-        screen.status_right_extra = f"({agent.active_name()}) {agent.current_model()}"
+        extra = "" if agent.cfg.get("reasoning", True) else " · no-think"
+        screen.status_right_extra = f"({agent.active_name()}) {agent.current_model()}{extra}"
 
     def on_tool(name, args):
         if name in ("shell", "bash", "run_command"):
@@ -593,7 +662,13 @@ def cli():
         screen.user_msg(text)
         screen.status = "thinking…"
         screen.finish_stream()
+        screen.set_busy(True)          # shrinks the wheel, gives the rows to the pane
         screen.kick()
+
+        def on_thinking():
+            # every model iteration is a fresh block: the second round's
+            # reasoning must not append to the first round's reasoning
+            screen.finish_stream()
 
         def on_delta(piece):
             screen.status = "speaking…"
@@ -603,12 +678,12 @@ def cli():
             screen.status = "thinking…"
             screen.stream_piece(piece, "", "think")
 
-        screen.busy = True
         try:
-            answer = agent.send(text, on_delta=on_delta, on_reason=on_reason,
+            answer = agent.send(text, on_thinking=on_thinking,
+                                on_delta=on_delta, on_reason=on_reason,
                                 on_tool=on_tool, on_result=on_result)
-        except KeyboardInterrupt:
-            screen.busy = False
+        except (KeyboardInterrupt, Cancelled):
+            screen.set_busy(False)
             screen.status = "stopped"
             screen.finish_stream()
             screen.say(f"{DIM}⏹ stopped — kept whatever streamed so far{R0}")
@@ -616,14 +691,14 @@ def cli():
             screen.kick()
             return
         except Exception as e:
-            screen.busy = False
+            screen.set_busy(False)
             screen.status = "ready"
             screen.finish_stream()
             screen.say(f"{RED}✗ {e}{R0}")
             screen.say("")
             screen.kick()
             return
-        screen.busy = False
+        screen.set_busy(False)
         screen.status = "ready"
         screen.finish_stream()
         if not answer:
@@ -635,15 +710,30 @@ def cli():
     # the model is working
     turns = Turns(run_turn, on_change=lambda n: setattr(screen, "queued", n))
 
+    def handle_interrupt() -> bool:
+        """Ctrl+C. Streaming → stop the reply and keep what arrived.
+        Idle → let the editor clear the line (returns False)."""
+        if turns.busy():
+            agent.cancel()
+            screen.status = "stopping…"
+            screen.kick()
+            return True
+        return False
+
     while True:
         refresh_statusbar()
         try:
             line = screen.input_line(f"{GOLD}❯ {R0}", history=history,
                                      completer=completer,
                                      on_options=on_options,
-                                     on_expand=screen.toggle_tools).strip()
+                                     on_expand=screen.toggle_tools,
+                                     on_interrupt=handle_interrupt).strip()
         except KeyboardInterrupt:
-            # ^C at the prompt: cancel the line, never the session
+            # The tty keeps ISIG on, so ^C arrives as SIGINT here rather than as
+            # a byte the editor can decode. Route it through the same handler:
+            # streaming → stop the reply; idle → cancel the line.
+            if handle_interrupt():
+                continue
             screen.say(f"{DIM}^C{R0}")
             screen.kick()
             continue
@@ -669,7 +759,7 @@ def cli():
             elif cmd == "/help":
                 screen.say(f"{BOLD}commands{R0}")
                 for h in ["/help            this", "/quit            exit",
-                          "/stop            drop queued messages (in-flight finishes)",
+                          "/stop            stop the reply in flight + drop the queue",
                           "/new             fresh context (memory keeps history)",
                           "/provider        list providers", "/provider <n>    switch provider",
                           "/model           list models (numbered)", "/model <n|name>  switch model",
@@ -680,6 +770,7 @@ def cli():
                           "/allow rm <n>    remove a whitelist rule",
                           "/cd <path>       change the shell working dir (persists)",
                           "/pwd             where the shell runs",
+                          "/reasoning on|off show or hide the model's thinking",
                           "/mouse on|off    wheel-scroll the pane (off = native copy/paste)",
                           "/memory          recent stored messages",
                           "/clear           wipe stored memory"]:
@@ -755,7 +846,28 @@ def cli():
                 screen.say(f"{DIM}mouse {'on — wheel scrolls the pane, Shift+drag selects' if on else 'off — native select/copy works, PgUp/PgDn scroll'}{R0}")
             elif cmd == "/stop":
                 dropped = turns.clear()
-                screen.say(f"{DIM}{'cleared ' + str(dropped) + ' queued message(s)' if dropped else 'queue is empty — the reply in flight will finish'}{R0}")
+                was_running = turns.busy()
+                if was_running:
+                    agent.cancel()
+                    screen.status = "stopping…"
+                bits = []
+                if was_running:
+                    bits.append("stopping the reply in flight")
+                bits.append(f"cleared {dropped} queued message(s)" if dropped else "queue was empty")
+                screen.say(f"{DIM}{' · '.join(bits)}{R0}")
+                screen.kick()
+            elif cmd == "/reasoning":
+                want = arg.lower()
+                if want not in ("on", "off"):
+                    state = "on" if agent.cfg.get("reasoning", True) else "off"
+                    screen.say(f"{DIM}reasoning is {state} — /reasoning on|off{R0}")
+                else:
+                    on = want == "on"
+                    agent.set_reasoning(on)
+                    screen.say(f"{DIM}reasoning {want} — "
+                               f"{'thinking is shown and requested' if on else 'thinking hidden and the model is asked to skip it'}{R0}")
+                refresh_statusbar()
+                screen.kick()
             elif cmd == "/pwd":
                 from ..plugins import shell_cwd
                 screen.say(f"{DIM}shell cwd: {shell_cwd()}{R0}")

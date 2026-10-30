@@ -208,15 +208,31 @@ class Mahoraga:
 
     # ---- chat ----
 
+    def set_reasoning(self, on: bool) -> bool:
+        """Turn the model's thinking block on/off (persisted in config.json)."""
+        self.cfg["reasoning"] = bool(on)
+        self._save_config()
+        return bool(on)
+
+    def cancel(self) -> None:
+        """Stop the reply being generated right now (Ctrl+C / /stop)."""
+        try:
+            self.provider.cancel()
+        except Exception:
+            pass
+
     def send(self, text: str, on_thinking=None, on_tool=None,
              on_delta=None, on_reason=None, on_result=None) -> str:
         self.turn_count += 1
         budget = Budget(max_turns=self.cfg.get("max_turns", 20),
                         max_tokens=self.cfg.get("budget_tokens", 32_000))
+        reasoning = bool(self.cfg.get("reasoning", True))
         answer = run_turn(text, self.ctx, self.provider, self.registry, budget,
                           yolo=self.yolo, on_thinking=on_thinking,
-                          on_tool=on_tool, on_delta=on_delta, on_reason=on_reason,
-                          tools_on=self.tools_enabled, on_result=on_result)
+                          on_tool=on_tool, on_delta=on_delta,
+                          on_reason=on_reason if reasoning else None,
+                          tools_on=self.tools_enabled, on_result=on_result,
+                          reasoning=reasoning)
         mem.save_message("user", text)
         mem.save_message("assistant", answer)
         return answer

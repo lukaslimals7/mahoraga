@@ -217,7 +217,8 @@ class LineEditor:
 
     def __init__(self, redraw, history: list[str] | None = None,
                  completer=None, on_options=None,
-                 on_scroll=None, on_follow=None, on_expand=None):
+                 on_scroll=None, on_follow=None, on_expand=None,
+                 on_interrupt=None):
         self.redraw = redraw          # (prompt, buf, cur) -> paints the row
         self.state = LineState(history)
         self.completer = completer
@@ -225,6 +226,8 @@ class LineEditor:
         self.on_scroll = on_scroll    # (step) -> None; + = newer, - = older
         self.on_follow = on_follow    # () -> None; jump back to the live tail
         self.on_expand = on_expand    # () -> None; toggle tool-output expand
+        # () -> bool; True = it handled the ^C (stopped a reply), False = clear line
+        self.on_interrupt = on_interrupt
 
     def read(self, prompt: str) -> str:
         """Edit one line. Tty is expected in cbreak+noecho (set_raw by the app).
@@ -296,7 +299,11 @@ class LineEditor:
             elif action == WORD_BACK:
                 st.word_back()
             elif action == INTERRUPT:
-                st.buf, st.cur = "", 0        # ^C: cancel the line, keep going
+                if self.on_interrupt and self.on_interrupt():
+                    # stopped a running reply — leave the half-typed line intact
+                    self.redraw(prompt, st.buf, st.cur)
+                    continue
+                st.buf, st.cur = "", 0        # ^C at rest: cancel the line
                 st._hist_idx = None
                 self.redraw(prompt, st.buf, st.cur)
                 continue

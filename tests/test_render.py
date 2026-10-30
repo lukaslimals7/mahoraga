@@ -43,9 +43,9 @@ for seg in segs:
     core = seg
     while core.endswith("\033[u") or core.endswith("\033[s"):   # drop cursor markers
         core = core[:-3]
-    body = core.replace("\033[K", "")
+    body = core.replace("\033[K", "").replace("\033[2K", "")
     assert vis_len(body) <= s.cols - 1, f"row overflow: {vis_len(body)} > {s.cols-1}"
-    assert core.endswith("\033[K"), "row not cleared to EOL"
+    assert ("\033[2K" in core or core.endswith("\033[K")), "row not cleared before draw"
 print(f"paint segments: {len(segs)} rows, all fit + cleared: OK")
 
 # 4) full app boots and exits cleanly on EOF

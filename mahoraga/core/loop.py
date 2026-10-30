@@ -15,7 +15,7 @@ def run_turn(user_text: str, ctx: Context, provider: LLMProvider,
              registry: Registry, budget: Budget,
              yolo: bool = False, on_thinking=None, on_tool=None,
              on_delta=None, on_reason=None, tools_on: bool = True,
-             on_result=None) -> str:
+             on_result=None, reasoning: bool = True) -> str:
     """One user turn → final assistant answer (may involve many tool calls)."""
     ctx.add_user(user_text)
     tools = registry.schemas() if tools_on else None
@@ -31,7 +31,7 @@ def run_turn(user_text: str, ctx: Context, provider: LLMProvider,
 
         resp = provider.chat(ctx.build_payload(), tools=tools,
                              stream=bool(on_delta), on_delta=on_delta,
-                             on_reason=on_reason)
+                             on_reason=on_reason, reasoning=reasoning)
         budget.charge_tokens(resp.usage.get("total_tokens", 0))
 
         if not resp.tool_calls:

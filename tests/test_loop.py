@@ -18,7 +18,8 @@ class MockLLM:
     def __init__(self):
         self.step = 0
 
-    def chat(self, messages, tools=None, stream=False, on_delta=None, on_reason=None):
+    def chat(self, messages, tools=None, stream=False, on_delta=None,
+             on_reason=None, reasoning=True):
         self.step += 1
         if self.step == 1:
             # first call: request a tool

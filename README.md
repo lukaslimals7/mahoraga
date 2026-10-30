@@ -27,7 +27,14 @@ That's the whole design. The core loop is ~50 lines; everything else is the part
 - **Tool cards** — every call renders as a block: the command, its output, and how long it took. Long output is truncated with a marker; `Ctrl+O` expands it.
 - **Queue messages while it works** — the prompt never locks. Type while the model is replying and your message is queued (`↳ queued #1`), runs next, in order. The status bar shows `+N queued`.
 - **Markdown that respects a terminal** — headings cleaned, tables rendered as real box-drawing tables instead of raw pipes.
-- **Scrollback** — `PgUp`/`PgDn` through history; reaching the bottom re-enables live follow.
+- **Scrollback** — `PgUp`/`PgDn` through history. The view holds its place when new text arrives and
+  survives a resize; reaching the bottom re-enables live follow.
+- **Stop a reply** — `Ctrl+C` mid-stream ends generation and keeps whatever arrived. `/stop` does the
+  same and clears the queue.
+- **Reasoning on/off** — `/reasoning off` hides the thinking block and asks the backend to skip it;
+  the setting persists in `config.json`.
+- **The wheel yields to the transcript** — while a reply streams the banner collapses to two lines so
+  the pane gets the rows, then returns when it's done.
 - **Copy/paste friendly** — `/mouse off` restores native terminal selection; `/mouse on` gives the wheel-scroll behaviour back.
 - **Persistent history + tab completion** — arrow through 500 previous prompts; `Tab` completes commands, provider names, model numbers and allowlist indices.
 - **Resize-safe** — every region recomputes on `SIGWINCH` instead of smearing.
@@ -92,7 +99,8 @@ python3 -m mahoraga
 | `/provider` | list or switch providers |
 | `/tools` | list tools; `/tools off\|on` disable them for a turn |
 | `/allow` | list allowlist rules; `/allow <regex>` add; `/allow rm <n>` remove |
-| `/stop` | drop queued messages (a reply already streaming finishes) |
+| `/stop` | stop the reply in flight and drop the queue |
+| `/reasoning on\|off` | show/hide the model's thinking (persisted) |
 | `/new` | fresh context, history kept |
 | `/memory` | recent stored turns |
 | `/clear` | wipe stored memory |
@@ -100,7 +108,8 @@ python3 -m mahoraga
 | `/mouse on\|off` | wheel-scroll mode vs native selection |
 | `/quit` | exit |
 
-**Keys:** `Enter` send · `↑`/`↓` history · `Tab` complete · `PgUp`/`PgDn` scroll · `Ctrl+O` expand tool output · `Ctrl+C` clear the line · `Ctrl+D` quit.
+**Keys:** `Enter` send · `↑`/`↓` history · `Tab` complete · `PgUp`/`PgDn` scroll ·
+`Ctrl+O` expand tool output · `Ctrl+C` stop the reply (or clear an idle line) · `Ctrl+D` quit.
 
 ---
 
@@ -212,7 +221,8 @@ Honest limits, so you know what you're adopting:
 - **No image/vision input.** Text in, text out.
 - **No multi-agent orchestration.** One loop, one session — the swarm experiments are separate projects.
 - **No remote sandbox.** Tools run as you, on your machine. The policy layer is the guardrail, not a container.
-- **An in-flight request can't be aborted.** `/stop` clears the queue; the reply already streaming finishes on its own.
+- **Cancelling is best-effort at the socket.** `Ctrl+C` closes the stream and the worker stops within a
+  chunk or two; a request the server has already buffered may still cost a few tokens.
 - **POSIX-first.** Built and tested on Linux; Windows is untested.
 
 ---
