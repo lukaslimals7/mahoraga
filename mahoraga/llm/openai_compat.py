@@ -91,6 +91,20 @@ class OpenAICompat(LLMProvider):
                 resp.close()
             except Exception:
                 pass
+            # resp.close() may not unblock a blocked readline() on another
+            # thread (Python's http.client buffering swallows the socket
+            # close). Try the underlying socket directly so the stalled read
+            # raises instead of hanging forever.
+            try:
+                sock = getattr(resp, "fp", None)
+                if sock is not None:
+                    sock = getattr(sock, "fp", None)
+                    if sock is not None:
+                        raw = getattr(sock, "raw", None)
+                        if raw is not None:
+                            raw.close()
+            except Exception:
+                pass
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}
@@ -205,7 +219,6 @@ class OpenAICompat(LLMProvider):
         except Exception as e:            # timeouts, TLS, half-closed sockets
             return None, str(e)
 
-
     def chat(self, messages, tools=None, stream=False,
              on_delta=None, on_reason=None, reasoning: bool = True) -> ChatResponse:
         self._cancel.clear()
@@ -282,6 +295,14 @@ class OpenAICompat(LLMProvider):
                             slot["name"] += fn["name"]
                         if fn.get("arguments"):
                             slot["args"] += fn["arguments"]
+
+                # Stream ended (clean EOF or exception). If the user asked to
+                # stop, treat it as a stop even if readline() returned clean
+                # EOF instead of raising — resp.close() can shut the socket
+                # down without surfacing an exception through http.client's
+                # buffers.
+                if self._cancel.is_set():
+                    raise Cancelled() from None
             except Exception:
                 # Dragging the socket out from under a blocking read surfaces as
                 # OSError, ValueError or AttributeError depending on how far the
