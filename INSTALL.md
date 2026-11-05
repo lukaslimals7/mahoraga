@@ -114,10 +114,26 @@ pick: /model <n>  ·  /model <name>  ·  /model refresh re-queries
   config). For local servers the **live server list wins**; the pinned list is
   used only when the server can't be reached.
 
-### Option B — cloud API (DeepSeek, OpenRouter, anything OpenAI-compatible)
+### Option B — cloud API (DeepSeek, OpenRouter, NVIDIA, anything OpenAI-compatible)
 
-Put keys in `~/.mahoraga/.env` — they are read from the environment on every
-request and are **never** stored in the config file or the repo (`.env` is
+The short way: launch and paste the key at the prompt.
+
+```
+/key nvapi-xxxxxxxxxxxxxxxxxxxx          # service recognised from the prefix
+/key nvidia nvapi-xxxxxxxxxxxxxxxxxxxx   # …or name it
+```
+
+`/key` writes the provider block into `config.json`, stores the secret in
+`~/.mahoraga/.env` (mode 600, never in the config or the prompt history),
+proves which model the key can actually call with a one-token completion, and
+then switches to it. Known services: `nvidia`, `openrouter`, `deepseek`,
+`openai`, `xiaomi`, `moonshot`, `groq`, `xai`, `gemini`, `cerebras`,
+`fireworks`, `perplexity`, `together`, `mistral`, `deepinfra`. Tab completes
+them. Anything else: `/provider add <name> <base_url> <model> <ENV_VAR>`, then
+`/key <name> <key>`.
+
+The long way (still supported — keys are read from the environment on every
+request and are **never** stored in the config file or the repo; `.env` is
 gitignored):
 
 ```bash
@@ -128,6 +144,10 @@ OPENROUTER_API_KEY=sk-or-your-key-here
 EOF
 chmod 600 ~/.mahoraga/.env
 ```
+
+Editing `.env` by hand is fine for a key you already have in the config. What
+it cannot do is tell you *which model* the key is allowed to call — do that with
+`/model refresh` once the provider is active.
 
 ---
 

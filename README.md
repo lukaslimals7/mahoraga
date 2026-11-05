@@ -66,8 +66,9 @@ That's the whole design. The core loop is ~50 lines; everything else is the part
 ### Providers & models
 - Any `/v1/chat/completions` endpoint: llama.cpp server, Ollama, vLLM, LM Studio, OpenRouter, OpenAI, DeepSeek.
 - **llama.cpp router discovery** — walks `/v1/models`, `/models`, `?reload=1`, and every payload shape, so a multi-model router shows its whole menu.
-- **Numbered `/model` picker** with live switching, plus `/model refresh` to re-query.
+- **`/model` and `/provider` are scrolling pickers** — the lists come from your key, so they can be long: arrows/wheel move, enter picks, typing filters, `v` re-verifies every model with a real call. Numbers still work.
 - **`/provider`** to switch endpoints mid-session; keys come from env vars named in the config, never from argv.
+- **`/key <paste>`** — paste an API key and it writes the provider block into `config.json`, the secret into `.env` (mode 600), then **proves which model the key can really call** with a one-token completion before switching. No hand-editing JSON, and no 404s from a model the account was never granted.
 
 ### Memory
 - Every turn persisted to SQLite (`~/.mahoraga/memory.db`), last 30 replayed on launch.
@@ -97,8 +98,9 @@ python3 -m mahoraga
 | Command | What it does |
 |---|---|
 | `/help` | everything below, in the app |
-| `/model` | numbered list of models; `/model <n>` switches; `/model refresh` re-queries |
-| `/provider` | list or switch providers |
+| `/model` | scrolling list of models — ↑↓ move, enter picks, type to filter, `v` re-verifies; `/model <n>` still works |
+| `/provider` | scrolling list of providers (key state, model, model count) — enter switches; `add <name> <base_url> [model] [ENV_VAR]`, `rm <name>` |
+| `/key` | `/key <api-key>` or `/key <provider> <api-key>` — writes the provider + stores the secret + proves a model |
 | `/tools` | list tools; `/tools off\|on` disable them for a turn |
 | `/allow` | list allowlist rules; `/allow <regex>` add; `/allow rm <n>` remove |
 | `/stop` | stop the reply in flight and drop the queue |

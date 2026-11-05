@@ -169,7 +169,7 @@ class Picker:
         while True:
             try:
                 first = read_byte(fd)
-            except (OSError, ValueError):
+            except (OSError, ValueError, KeyboardInterrupt):
                 return None
             if not first:
                 return None                        # stdin closed: cancel
@@ -178,7 +178,10 @@ class Picker:
             def qr():
                 return queue.pop(0) if queue else read_byte(fd, 0.05)
 
-            action, text = decode_key(qr)
+            try:
+                action, text = decode_key(qr)
+            except (OSError, ValueError, KeyboardInterrupt):
+                return None
             n = len(self.visible())
 
             if action in (UP, WHEEL_UP):

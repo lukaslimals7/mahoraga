@@ -33,6 +33,24 @@ test for anything new; if a fix has no test, it will regress.
 | 13 | A worker error printed over the UI | `print()` in `Turns._worker` writes into an absolutely-addressed screen | report into the pane; the worker only re-raises to `run_turn` | code review |
 | 15 | Cursor parked **under the banner**, not on the prompt row | the slim wheel branch saved the cursor (`\033[s`) but never restored it, so each 80 ms repaint left it at row 4 and the later paints restored *to that* | restore at the end of the slim branch too | `test_cursor_position.py` |
 | 14 | Cursor sat still (no blink) | Only shown/hidden (`?25h`/`?25l`); terminals keep whatever DECSCUSR they were last given | `CURSOR_BLINK` (`?12h`, `5 q`) at the prompt, `CURSOR_DEFAULT` on exit | `test_cursor.py` |
+| 16 | Provider showed in `/provider`, the key was accepted, `/v1/models` listed 84 ids — and **every request answered 404** (`Function … Not found for account`) | Nothing ever proved a model answered. `/models` lists models the account is *not granted* (404) and retired ones stay listed (410), so a hand-written `model:` looked fine and was dead | `/key <paste>` writes the provider block, stores the secret in `.env`, and **proves a model with a real one-token completion** before activating; `/model refresh` re-scans and keeps only ids that answered; a failing turn now prints what the code actually means | `test_keycmd.py` + `test_key_tui.py` |
+
+## Modal windows (pickers)
+
+`/model` and `/provider` paint a list into the pane. Two rules keep it from
+corrupting the screen, and both already had a bug behind them elsewhere:
+
+1. **The render thread must not paint under a modal.** It repaints the pane
+   every 80 ms whenever something marks it dirty (a tool result, a status
+   change). `Screen.modal` makes `_loop` and `relayout` skip the pane while a
+   picker owns it; the pane is repainted once on the way out.
+2. **Paint absolutely, save/restore the cursor, and start every row with
+   `CSI 2K`.** Clearing to end-of-line leaves the previous frame's band behind
+   a plain row (row 5 in the table above — same failure, same fix).
+
+The window maths (`window_slice`) is pure and tested in `test_picker.py`; the
+key handling is only provable in a terminal, so `test_key_tui.py` drives the
+real app with arrow keys.
 
 ## Testing a TUI change
 
@@ -55,4 +73,4 @@ for t in tests/test_*.py; do printf '%-30s ' "$t"; python3 "$t" >/tmp/o 2>&1 \
   && echo PASS || { echo FAIL; tail -5 /tmp/o; }; done
 ```
 
-13 files, all stdlib, no pytest.
+19 files, all stdlib, no pytest.

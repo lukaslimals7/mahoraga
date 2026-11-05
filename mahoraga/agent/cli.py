@@ -15,13 +15,15 @@ line can only clip at the right edge — it can never wrap, scroll, or shift the
 layout. Every painted row ends in \\033[K (clear to end of line).
 """
 from __future__ import annotations
-import sys, threading, time, json, re, shutil, queue
+import sys, os, threading, time, json, re, shutil, queue
 
 from ..core.runtime import Mahoraga
+from ..llm import catalog
 from ..llm.provider import Cancelled
 from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
 from ..policy import approval
 from .lineedit import LineEditor, complete, set_raw, restore
+from .picker import Picker, window_slice
 from .markdown import render as md_render
 
 BOLD = "\033[1m"; DIM = "\033[2m"; CYAN = "\033[36m"; GOLD = "\033[33m"
@@ -84,8 +86,9 @@ COMMAND_SPEC: list[tuple[str, str, str]] = [
     ("/quit", "", "exit"),
     ("/new", "", "fresh context (memory keeps history)"),
     ("/stop", "", "stop the reply in flight + drop the queue"),
-    ("/provider", "[name]", "list providers / switch"),
-    ("/model", "[n|name|refresh]", "list models (numbered) / switch"),
+    ("/provider", "[name|add|rm]", "scroll & pick a provider · switch · add · rm"),
+    ("/key", "[provider] <key>", "paste a key → config entry + .env + a proven model"),
+    ("/model", "[n|name|refresh]", "scroll & pick a model · number · refresh"),
     ("/tools", "on|off", "list tools / enable or disable them"),
     ("/reasoning", "on|off", "show or hide the model's thinking"),
     ("/wheel", "sticky|auto|full|<rows>", "banner size"),
@@ -99,6 +102,7 @@ COMMAND_SPEC: list[tuple[str, str, str]] = [
 # Fixed candidate words per command — data, so it can be tested and cannot drift
 # silently the way the old inline branch chain did.
 STATIC_ARG_POOL: dict[str, list[str]] = {
+    "/key": catalog.names(),          # the catalog is data — Tab can offer it
     "/reasoning": ["on", "off"],
     "/mouse": ["on", "off"],
     "/tools": ["on", "off"],
@@ -130,6 +134,52 @@ def complete_line(buf: str, cur: int, names: list[str], arg_pool) -> tuple | Non
         return complete(buf, cur, pool, len(cmd) + 1)
     except Exception:
         return None      # Tab doing nothing beats Tab killing the prompt
+
+
+def parse_key_arg(arg: str) -> tuple[str | None, str]:
+    """`/key` argument → (provider or None, secret). Never raises, never eats a
+    key: a pasted key has no spaces, so a second word can only be a provider.
+
+    Bare `/key` used to crash the whole TUI here (empty split → index error),
+    so this is a pure function with a test rather than inline prompt code.
+    """
+    bits = (arg or "").split()
+    if not bits:
+        return None, ""
+    if len(bits) == 1:
+        return None, bits[0]
+    return bits[0], bits[1]
+
+
+def error_hint(err) -> str:
+    """What to DO about a failed call, in one line. Empty when there's nothing
+    useful to add.
+
+    HTTP codes from these platforms are actively misleading: NVIDIA answers 404
+    "Function … Not found for account" for a model the account isn't granted,
+    and 410 for a model it retired — neither means the URL or the key is wrong,
+    so the raw message alone leaves the user stuck. Pure function: tested.
+    """
+    code = getattr(err, "code", None)
+    text = str(err or "").lower()
+    if code in (401, 403):
+        return ("that key was rejected — /key <provider> <key> to replace it, "
+                "or /provider to switch")
+    if code == 410 or "end of life" in text or "no longer available" in text:
+        return ("the service retired this model — /model refresh picks one that "
+                "still answers")
+    if code == 404 and ("not found for account" in text or "function" in text):
+        return ("the account isn't granted this model — /model refresh scans for "
+                "the ones that do answer")
+    if code == 404:
+        return ("404 — wrong base_url, wrong path, or that model doesn't exist "
+                "here · /provider to check the endpoint")
+    if code in (429, 402):
+        return "rate limit or no credit on this key — /provider to switch, or wait"
+    if code is None:
+        return ("the endpoint didn't answer — /provider to switch, or check it's "
+                "running (local servers: /model refresh)")
+    return ""
 
 
 def vis_len(s: str) -> int:
@@ -211,6 +261,7 @@ class Screen:
         self.status = "ready"
         self.status_left_extra = ""     # cwd (branch), set by cli()
         self.status_right_extra = ""    # (provider) model, set by cli()
+        self.modal = False              # a picker owns the pane: don't repaint it
         self.resize_pending = threading.Event()
         self._input_snapshot = ("", "", 0)   # prompt, buf, cur for repaints
 
@@ -467,7 +518,8 @@ class Screen:
         sys.stdout.write("\033[2J")        # wipe, then repaint absolutely
         self._dirty.set()
         self._paint_wheel()
-        self._paint_pane()
+        if not self.modal:                  # never wipe a picker mid-choice
+            self._paint_pane()
         self._paint_bottom()
         self._redraw_input(*self._input_snapshot)
 
@@ -481,7 +533,8 @@ class Screen:
             self._paint_wheel()
             if self._dirty.is_set():
                 self._dirty.clear()
-                self._paint_pane()
+                if not self.modal:          # a picker owns the pane right now
+                    self._paint_pane()
             self._paint_bottom()
             time.sleep(0.08)
 
@@ -587,6 +640,26 @@ class Screen:
 
     def kick(self):
         self._dirty.set()
+
+    def pick(self, title: str, items: list[dict], footer: str = "",
+             refresh=None):
+        """Open the modal list over the pane and block until Enter/Esc.
+
+        Returns the chosen value, or None when cancelled or when there is
+        nothing to choose (a non-tty run keeps the old printed list). The pane
+        is repainted on the way out, because the picker painted over it.
+        """
+        if not items or not sys.stdin.isatty():
+            return None
+        picker = Picker(self, title, items, footer=footer, refresh=refresh)
+        self.modal = True
+        try:
+            return picker.run()
+        finally:
+            self.modal = False
+            self._last_total = None         # re-anchor the pane at the tail
+            self._dirty.set()
+            self._paint_pane()
 
 
 class Turns:
@@ -699,7 +772,7 @@ def cli():
         if static:
             return list(static)
         if cmd == "/provider":
-            return agent.provider_names()
+            return ["add", "rm"] + agent.provider_names()
         if cmd == "/model":
             if time.time() - model_cache["t"] > 30:
                 model_cache["list"] = agent.model_names_cached()
@@ -808,6 +881,9 @@ def cli():
             screen.status = "ready"
             screen.finish_stream()
             screen.say(f"{RED}✗ {e}{R0}")
+            hint = error_hint(e)
+            if hint:
+                screen.say(f"{DIM}→ {hint}{R0}")
             screen.say("")
             screen.kick()
             return
@@ -822,6 +898,95 @@ def cli():
     # turns run on a worker thread so you can keep typing (and queue) while
     # the model is working
     turns = Turns(run_turn, on_change=lambda n: setattr(screen, "queued", n))
+
+    # ---- pickers (the lists come from the key, so they scroll) ----
+
+    def _model_items() -> list[dict]:
+        cur = agent.current_model()
+        return [{"label": m, "value": m, "mark": m == cur}
+                for m in agent.available_models()]
+
+    def _list_models():
+        """`/model` with no argument: scroll and pick, instead of typing a number."""
+        if turns.busy():
+            screen.say(f"{DIM}a reply is in flight — ^C or /stop, then /model{R0}")
+            return
+        pcfg = agent.active_cfg()
+        keyed = bool(pcfg.get("api_key_env"))
+        items = _model_items()
+        cur = agent.current_model()
+
+        if not sys.stdin.isatty():                 # pipes and tests: print it
+            screen.say(f"{BOLD}current:{R0} {cur}  {DIM}({agent.active_name()}){R0}")
+            for i, it in enumerate(items[:30], 1):
+                mark = f"{GOLD}●{R0}" if it["mark"] else " "
+                screen.say(f" {mark} {DIM}{i:>2}{R0}  {it['label']}")
+            return
+
+        if not keyed and not getattr(agent.provider, "reachable", lambda: True)():
+            screen.say(f"{RED}can't reach {pcfg.get('base_url', '')}{R0} — "
+                       f"is the model server running?")
+            return
+
+        def _refresh(note):
+            if not keyed:
+                note("re-reading the local server…")
+                return _model_items()
+            res = agent.verify_models(
+                on_progress=lambda d, n: note(f"verifying {d}/{n} — one real call each…"))
+            note(f"{len(res['working'])} of {len(res['advertised'])} answered")
+            return _model_items()
+
+        footer = ("↑↓ move · enter use · type to filter · esc cancel"
+                  + (" · v verify (slow)" if keyed else ""))
+        picked = screen.pick(f"models · {agent.active_name()}", items,
+                             footer=footer,
+                             refresh=_refresh if keyed else None)
+        if picked:
+            screen.say(f"{DIM}model -> {agent.set_model(picked)}{R0}")
+            refresh_statusbar()
+
+    def _provider_items() -> list[dict]:
+        cur = agent.active_name()
+        rows = []
+        for n in agent.provider_names():
+            pcfg = agent.cfg["providers"][n]
+            env = pcfg.get("api_key_env") or ""
+            bits = [pcfg.get("model", "") or "(no model)"]
+            bits.append("local" if not env
+                        else ("key ✓" if os.environ.get(env) else "no key"))
+            if pcfg.get("models"):
+                bits.append(f"{len(pcfg['models'])} models")
+            rows.append({"label": n, "meta": " · ".join(bits),
+                         "value": n, "mark": n == cur})
+        return rows
+
+    def _pick_provider():
+        """`/provider` with no argument: scroll and switch."""
+        if turns.busy():
+            screen.say(f"{DIM}a reply is in flight — ^C or /stop, then /provider{R0}")
+            return
+        cur = agent.active_name()
+        items = _provider_items()
+        if not sys.stdin.isatty():
+            for it in items:
+                screen.say(f" {'●' if it['mark'] else ' '} {BOLD}{it['label']}{R0} "
+                           f"· {DIM}{it['meta']}{R0}")
+            return
+        picked = screen.pick(f"providers · {cur}", items,
+                             footer="↑↓ move · enter switch · esc cancel")
+        if not picked or picked == cur:
+            return
+        try:
+            name = agent.switch_provider(picked)
+        except ValueError as e:
+            screen.say(f"{RED}{e}{R0}")
+            return
+        screen.say(f"{DIM}provider -> {name} ({agent.current_model()}){R0}")
+        refresh_statusbar()
+        if not agent.provider_key_ok():
+            screen.say(f"{RED}⚠ {agent.active_cfg().get('api_key_env')} not set — "
+                       f"/key {name} <key>{R0}")
 
     def handle_interrupt() -> bool:
         """Ctrl+C. Streaming → stop the reply and keep what arrived.
@@ -856,7 +1021,9 @@ def cli():
             break
         if not line:
             continue
-        history.append(line)
+        # a pasted key must never land in ~/.mahoraga/history in plaintext
+        if not line.startswith("/key "):
+            history.append(line)
         try:
             hist_path.write_text("\n".join(history[-500:]) + "\n")
         except OSError:
@@ -878,11 +1045,44 @@ def cli():
                 screen.say(f"{DIM}type while it works — messages queue · ^C stops the reply · "
                            f"Ctrl+O expands tool output · PgUp/PgDn scrolls · "
                            f"yolo: python -m mahoraga --yolo{R0}")
+                screen.say(f"{DIM}/model and /provider open a list: ↑↓ move, enter pick, "
+                           f"type to filter, esc cancel{R0}")
             elif cmd == "/new":
                 agent.new_session()
                 screen.say(f"{DIM}context cleared{R0}")
             elif cmd == "/provider":
-                if arg:
+                sub, _, rest = arg.partition(" ")
+                sub = sub.strip().lower()
+                if sub == "add":
+                    bits = rest.split()
+                    if len(bits) < 2:
+                        screen.say(f"{DIM}usage: /provider add <name> <base_url> [model] [ENV_VAR]{R0}")
+                        screen.say(f"{DIM}then /key <name> <key> — it stores the secret and proves a model{R0}")
+                    else:
+                        try:
+                            entry = agent.add_provider(
+                                bits[0], bits[1],
+                                bits[2] if len(bits) > 2 else "",
+                                bits[3] if len(bits) > 3 else "")
+                        except ValueError as e:
+                            screen.say(f"{RED}{e}{R0}")
+                        else:
+                            screen.say(f"{GREEN}✓{R0} {BOLD}{bits[0].lower()}{R0} written to "
+                                       f"{DIM}{agent.cfg_path}{R0}")
+                            screen.say(f"  {entry['base_url']} · model "
+                                       f"{entry.get('model') or '(unset)'} · "
+                                       f"key {entry['api_key_env']}")
+                            screen.say(f"{DIM}next: /key {bits[0].lower()} <key>{R0}")
+                elif sub == "rm":
+                    try:
+                        now = agent.remove_provider(rest.strip())
+                    except ValueError as e:
+                        screen.say(f"{RED}{e}{R0}")
+                    else:
+                        screen.say(f"{DIM}removed · active is now {now} (the key stays in "
+                                   f"{agent.env_path.name}){R0}")
+                        refresh_statusbar()
+                elif arg:
                     try:
                         name = agent.switch_provider(arg)
                         screen.say(f"{DIM}provider -> {name} ({agent.current_model()}){R0}")
@@ -892,12 +1092,77 @@ def cli():
                     except ValueError as e:
                         screen.say(f"{RED}{e}{R0}")
                 else:
-                    cur = agent.active_name()
-                    for n in agent.provider_names():
-                        mark = f"{GOLD}●{R0}" if n == cur else " "
-                        screen.say(f" {mark} {BOLD}{n}{R0} · {DIM}{agent.cfg['providers'][n].get('model','')}{R0}")
+                    _pick_provider()
+            elif cmd == "/key":
+                prov, secret = parse_key_arg(arg)
+                if not secret:
+                    screen.say(f"{BOLD}paste a key{R0} {DIM}— /key <key>   ·   /key <provider> <key>{R0}")
+                    screen.say(f"{DIM}it writes the provider into {agent.cfg_path} and the secret "
+                               f"into {agent.env_path}{R0}")
+                    screen.say(f"{DIM}then proves which model the key can actually call{R0}")
+                    screen.say(f"{DIM}known: {', '.join(catalog.names())}{R0}")
+                else:
+                    def _probe_status(done, total):
+                        screen.status = f"probing models {done}/{total}…"
+                        screen.kick()
+                    screen.status = "checking key…"
+                    screen.kick()
+                    try:
+                        rep = agent.connect(secret, prov, on_progress=_probe_status)
+                    except ValueError as e:
+                        screen.say(f"{RED}✗ {e}{R0}")
+                    else:
+                        if rep["activated"]:
+                            screen.say(f"{GREEN}✓{R0} {BOLD}{rep['provider']}{R0} "
+                                       f"{DIM}{rep['base_url']}{R0}")
+                            screen.say(f"  {rep['env']} = {rep['key']}  {DIM}→ "
+                                       f"{agent.env_path} (mode 600){R0}")
+                            screen.say(f"  {DIM}listed {len(rep['advertised'])} · proven "
+                                       f"{len(rep['working'])}{R0} · using "
+                                       f"{BOLD}{rep['model']}{R0}")
+                            others = [m for m in rep['working'][1:6]]
+                            if others:
+                                screen.say(f"  {DIM}also proven: {', '.join(others)}{R0}")
+                            dead = rep.get("dead") or []
+                            if dead:
+                                screen.say(f"  {DIM}dropped {len(dead)} dead model(s) the "
+                                           f"service won't serve{R0}")
+                            refresh_statusbar()
+                        else:
+                            screen.say(f"{GOLD}~{R0} {BOLD}{rep['provider']}{R0} "
+                                       f"{DIM}saved but not switched{R0}")
+                            screen.say(f"  {rep['detail']}")
+                            screen.say(f"  {DIM}key is in {agent.env_path} · fix the model with "
+                                       f"/provider add, or /model refresh to re-scan{R0}")
+                    screen.status = "ready"
+                    screen.kick()
             elif cmd == "/model":
-                if arg in ("refresh", "list"):
+                if arg in ("refresh", "verify") and agent.active_cfg().get("api_key_env"):
+                    name = agent.active_name()
+
+                    def _scan_status(done, total):
+                        screen.status = f"verifying {done}/{total} models…"
+                        screen.kick()
+                    screen.status = "verifying models…"
+                    screen.kick()
+                    try:
+                        res = agent.verify_models(on_progress=_scan_status)
+                    except Exception as e:
+                        screen.say(f"{RED}✗ {e}{R0}")
+                    else:
+                        screen.say(f"{DIM}{name}: {len(res['working'])} of "
+                                   f"{len(res['advertised'])} advertised models answered "
+                                   f"a real call{R0}")
+                        if res.get("dead"):
+                            screen.say(f"{DIM}dropped {len(res['dead'])} dead · model "
+                                       f"{res['model']}{R0}")
+                        if not res["working"]:
+                            screen.say(f"{RED}nothing answered — the key may be wrong, "
+                                       f"or the account has no models{R0}")
+                    screen.status = "ready"
+                    screen.kick()
+                    arg = ""
+                elif arg in ("refresh", "list"):
                     arg = ""
                 if arg:
                     picked = agent.resolve_model(arg)
@@ -907,23 +1172,7 @@ def cli():
                         screen.say(f"{DIM}model -> {agent.set_model(picked)}{R0}")
                         refresh_statusbar()
                 else:
-                    cur = agent.current_model()
-                    models = agent.available_models()
-                    pcfg = agent.active_cfg()
-                    screen.say(f"{BOLD}current:{R0} {cur}  {DIM}({agent.active_name()}){R0}")
-                    for i, m in enumerate(models[:30], 1):
-                        mark = f"{GOLD}●{R0}" if m == cur else " "
-                        screen.say(f" {mark} {DIM}{i:>2}{R0}  {m}")
-                    if len(models) == 1 and not pcfg.get("api_key_env"):
-                        if not getattr(agent.provider, "reachable", lambda: True)():
-                            screen.say(f"{RED}can't reach {pcfg.get('base_url','')}{R0} "
-                                       f"— is the model server running?")
-                        else:
-                            screen.say(f"{DIM}server listed one model — add more via "
-                                       f"llama.cpp presets, or set \"models\": [...] "
-                                       f"in ~/.mahoraga/config.json{R0}")
-                    screen.say(f"{DIM}pick: /model <n>  ·  /model <name>  ·  "
-                               f"/model refresh re-queries{R0}")
+                    _list_models()
             elif cmd == "/tools":
                 if arg in ("off", "on"):
                     agent.tools_enabled = arg == "on"

@@ -79,6 +79,7 @@ class OpenAICompat(LLMProvider):
         self.timeout = timeout
         self._cancel = threading.Event()
         self._active = None          # the live response object, for cancel()
+        self.list_error = ""         # why /models came back empty, for /key
 
     def cancel(self) -> None:
         """Stop the current stream: flag it, and close the socket so a stalled
@@ -161,12 +162,14 @@ class OpenAICompat(LLMProvider):
         without a restart. Accepts every response shape (see `_extract_ids`).
         Empty list = server unreachable or nothing advertised."""
         urls = [f"{b}/models" for b in self._bases()]
+        self.list_error = ""
         for url in urls:
             for suffix in ("", "?reload=1"):
                 try:
                     ids = _extract_ids(self._get_json(url + suffix))
-                except Exception:
+                except Exception as e:
                     ids = []
+                    self.list_error = str(e)      # why the listing is empty
                 if ids:
                     self.base_url = url.rsplit("/models", 1)[0]
                     return ids
@@ -181,6 +184,27 @@ class OpenAICompat(LLMProvider):
             except Exception:
                 continue
         return False
+
+    def ping(self, model: str, timeout: float = 20.0) -> tuple[int | None, str]:
+        """Does this model actually ANSWER for this key? (status, message).
+
+        A 200 from /models proves nothing: NVIDIA and OpenRouter list models
+        the key may not call, and the platform answers 404 "Function … Not
+        found for account". One real one-token completion is the only honest
+        test, and it is what `/key` uses before saving a model.
+        """
+        body = {"model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1, "stream": False}
+        try:
+            with self._chat_post(body, timeout=timeout) as resp:
+                resp.read()
+            return 200, ""
+        except LLMError as e:
+            return e.code, str(e)
+        except Exception as e:            # timeouts, TLS, half-closed sockets
+            return None, str(e)
+
 
     def chat(self, messages, tools=None, stream=False,
              on_delta=None, on_reason=None, reasoning: bool = True) -> ChatResponse:
