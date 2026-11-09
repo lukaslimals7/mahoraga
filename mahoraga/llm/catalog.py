@@ -33,6 +33,16 @@ KNOWN: dict[str, dict] = {
         "models": ["openrouter/auto"],
         "trust_listing": False,
     },
+    "opencode": {
+        "label": "OpenCode Zen (opencode.ai)",
+        "base_url": "https://opencode.ai/inference/v1",
+        "api_key_env": "OPENCODE_API_KEY",
+        "exact": ["oc_sk_"],
+        "weak": ["sk-"],
+        "models": ["mimo-v2.6-flash-free", "deepseek-v4.1-flash-free",
+                   "glm-5.3-flash-free", "longcat-2.5-free"],
+        "trust_listing": False,
+    },
     "deepseek": {
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com",

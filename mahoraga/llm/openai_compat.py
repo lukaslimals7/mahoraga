@@ -107,7 +107,11 @@ class OpenAICompat(LLMProvider):
                 pass
 
     def _headers(self) -> dict:
-        h = {"Content-Type": "application/json"}
+        # A User-Agent of our own: urllib's default ("Python-urllib/3.x") is on
+        # Cloudflare's block list and answers 403 "error code: 1010" — which
+        # silently empties /models on any Cloudflare-fronted provider.
+        h = {"Content-Type": "application/json",
+             "User-Agent": "mahoraga/1.0"}
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h

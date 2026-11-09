@@ -126,11 +126,15 @@ The short way: launch and paste the key at the prompt.
 `/key` writes the provider block into `config.json`, stores the secret in
 `~/.mahoraga/.env` (mode 600, never in the config or the prompt history),
 proves which model the key can actually call with a one-token completion, and
-then switches to it. Known services: `nvidia`, `openrouter`, `deepseek`,
-`openai`, `xiaomi`, `moonshot`, `groq`, `xai`, `gemini`, `cerebras`,
+then switches to it. Known services: `nvidia`, `openrouter`, `opencode`,
+`deepseek`, `openai`, `xiaomi`, `moonshot`, `groq`, `xai`, `gemini`, `cerebras`,
 `fireworks`, `perplexity`, `together`, `mistral`, `deepinfra`. Tab completes
 them. Anything else: `/provider add <name> <base_url> <model> <ENV_VAR>`, then
 `/key <name> <key>`.
+
+`opencode` covers OpenCode Zen (`oc_sk_…` keys, or `sk-…` Go keys) at
+`https://opencode.ai/inference/v1`. Its free-tier models are preset, and `/key`
+proves which of them the key can actually call before switching.
 
 The long way (still supported — keys are read from the environment on every
 request and are **never** stored in the config file or the repo; `.env` is

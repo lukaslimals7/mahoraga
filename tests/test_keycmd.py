@@ -41,8 +41,12 @@ check("nvapi- identifies NVIDIA", catalog.detect("nvapi-abc123") == ("nvidia", [
 check("sk-or- identifies OpenRouter",
       catalog.detect("sk-or-v1-deadbeef") == ("openrouter", []))
 check("sk-proj- identifies OpenAI", catalog.detect("sk-proj-xyz") == ("openai", []))
+check("oc_sk- identifies OpenCode",
+      catalog.detect("oc_sk_abc123") == ("opencode", []))
+check("opencode is a known service", "opencode" in catalog.names())
 name, cands = catalog.detect("sk-0123456789")
-check("bare sk- is ambiguous, never a guess", name is None and "deepseek" in cands,
+check("bare sk- is ambiguous, never a guess",
+      name is None and "deepseek" in cands and "opencode" in cands,
       f"{name} {cands}")
 check("unknown shape → no idea", catalog.detect("totally-not-a-key") == (None, []))
 check("empty → no idea", catalog.detect("") == (None, []))

@@ -104,6 +104,15 @@ check("_bases: /v1 → [/v1, bare]",
 check("_bases: trailing slash normalised",
       OpenAICompat("http://h:1/v1/")._bases() == ["http://h:1/v1", "http://h:1"])
 
+# ---- headers: urllib's default User-Agent is on Cloudflare's block list
+# (403 "error code: 1010"), which silently empties /models on providers
+# fronted by it — so the client must always send one of its own.
+h = OpenAICompat("http://127.0.0.1:8171", api_key="k")._headers()
+check("requests carry a User-Agent", bool(h.get("User-Agent")), str(h))
+check("auth is a Bearer header", h.get("Authorization") == "Bearer k", str(h))
+check("no auth header when there is no key",
+      "Authorization" not in OpenAICompat("http://127.0.0.1:8171")._headers())
+
 # ---- errors stay informative ----
 p5 = OpenAICompat("http://127.0.0.1:8172", model="x", timeout=2)
 try:
