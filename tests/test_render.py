@@ -48,7 +48,41 @@ for seg in segs:
     assert ("\033[2K" in core or core.endswith("\033[K")), "row not cleared before draw"
 print(f"paint segments: {len(segs)} rows, all fit + cleared: OK")
 
-# 4) full app boots and exits cleanly on EOF
+# 5) a multi-line tool command (a heredoc) must become one ROW PER LINE.
+#    One row carrying raw \n's made the terminal cursor walk down past the pane
+#    and spill the rest of the command onto the separator, the input row and
+#    the status bar — pane output visibly leaking into the prompt line.
+s2 = Screen()
+s2.cols, s2.rows = 120, 40
+s2.compact = False
+s2.wheel_h = s2._wheel_rows()
+s2.pane_top = s2.wheel_h + 1
+s2.pane_h = max(3, s2.sep_row - 1 - s2.wheel_h)
+s2.user_msg("filler " * 400)              # push the card to the pane's bottom
+cmd = "\n".join(["python3 << 'PYEOF'"] + [f"line{i} = {i}" for i in range(1, 12)]
+                + ["PYEOF"])
+s2.tool_call(cmd, "timeout 60s")
+s2.tool_result("ok", 0.1)
+
+wrapped = s2._wrapped()
+leak = [t for _, t in wrapped if "\n" in t or "\r" in t]
+assert not leak, f"a painted row carries a newline: {leak[:1]!r}"
+rows2 = [t for _, t in wrapped]
+for i in range(1, 12):
+    assert any(f"line{i} = {i}" in t for t in rows2), f"heredoc line {i} lost"
+assert any("PYEOF" in t and "timeout 60s" in t for t in rows2), "meta dropped"
+
+cap2 = Cap()
+old, sys.stdout = sys.stdout, cap2
+try:
+    s2._paint_wheel()
+    s2._paint_pane()
+finally:
+    sys.stdout = old
+assert "\n" not in cap2.buf, "pane paint still walks the cursor down"
+print("heredoc command: one row per line, paint emits no newline: OK")
+
+# 6) full app boots and exits cleanly on EOF
 p = subprocess.run([sys.executable, "-m", "mahoraga"], input=b"",
                    capture_output=True, timeout=40, cwd=".")
 assert p.returncode == 0, p.stderr[-400:]

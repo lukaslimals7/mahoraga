@@ -184,7 +184,21 @@ def error_hint(err) -> str:
 
 
 def vis_len(s: str) -> int:
-    return len(_ANSI.sub("", s))
+    """Display columns: SGR escapes and control chars occupy none."""
+    return sum(0 if ord(c) < 0x20 else 1 for c in _ANSI.sub("", s))
+
+
+def one_line(text: str) -> str:
+    """A painted row is ONE physical line — flatten anything that would move
+    the cursor.
+
+    A raw \\n or \\r inside a row's text makes the terminal walk down and keep
+    writing, so the tail of the row lands on the rows below the pane: the
+    separator, the input row and the status bar. Nothing repaints the input
+    row except the prompt, so the spill stays on screen — pane output visibly
+    leaking into the prompt line.
+    """
+    return text.replace("\r", " ").replace("\n", " ")
 
 
 def wrap_ansi(line: str, width: int) -> list[str]:
@@ -308,7 +322,7 @@ class Screen:
             g = glyphs[self._frame % len(glyphs)]
             out.append(_at(1) + f" {GOLD}{g} MAHORAGA{R0}\033[K")
             if self.wheel_h >= 2:
-                label = self.status + ("  ·  ctrl+c stops" if self.busy else "")
+                label = one_line(self.status) + ("  ·  ctrl+c stops" if self.busy else "")
                 out.append(_at(2) + f" {DIM}{label}{R0}\033[K")
             for r in range(3, self.wheel_h + 1):
                 out.append(_at(r) + "\033[2K")
@@ -373,8 +387,19 @@ class Screen:
             elif k == "tool":
                 rows.append(("", ""))
                 meta = f" {DIM}({_clean(str(e['meta']))})" if e.get("meta") else ""
-                rows.append((BG_TOOL,
-                             f"{GRTXT}$ {_md(_clean(str(e['head'])), tables=False)}{meta}"))
+                # The command may be a heredoc — several physical lines, and a
+                # single line can also run past the pane. Both become their own
+                # rows: one row carrying raw \n's makes the terminal cursor
+                # walk down past the pane and spill the rest of the command
+                # onto the separator, the input row and the status bar.
+                head = _md(_clean(str(e["head"])), tables=False)
+                hl: list[str] = []
+                for para in head.split("\n"):
+                    hl += self._wrap_plain(para, self.cols - 4) or [""]
+                for i, line in enumerate(hl):
+                    pre = "$ " if i == 0 else "  "
+                    post = meta if i == len(hl) - 1 else ""
+                    rows.append((BG_TOOL, f"{GRTXT}{pre}{line}{post}"))
                 rows.append((BG_TOOL, ""))
                 if e.get("out") is None:
                     body = [f"{DIM}running…"]
@@ -416,6 +441,7 @@ class Screen:
             cell = [_at(row) + R0 + "\033[2K"]
             if i < len(lines):
                 bg, text = lines[i]
+                text = one_line(text)
                 if bg:   # band rows: fill the full width with the background
                     pad = " " * max(0, self.cols - 1 - vis_len(text))
                     cell.append(bg + text + pad + R0 + "\033[K")
@@ -443,10 +469,11 @@ class Screen:
         else:
             state = f"{DIM}{self.status}{R0}"
             plain = self.status
-        left = f" {DIM}{self.status_left_extra}{R0}" if self.status_left_extra else ""
-        right_plain = f"{self.status_right_extra} • {plain}" if self.status_right_extra else plain
-        right = f"{GOLD}{self.status_right_extra}{R0} {DIM}•{R0} {state}" \
-            if self.status_right_extra else state
+        left = f" {DIM}{one_line(self.status_left_extra)}{R0}" if self.status_left_extra else ""
+        right_plain = (f"{self.status_right_extra} • {plain}"
+                       if self.status_right_extra else plain)
+        right = (f"{GOLD}{one_line(self.status_right_extra)}{R0} {DIM}•{R0} {state}"
+                 if self.status_right_extra else state)
         x = self.cols - 1 - vis_len(right_plain)
         out.append(_at(self.status_row) + left + "\033[K")
         out.append(_at(self.status_row, max(2, x)) + right + "\033[K")
