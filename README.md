@@ -51,7 +51,7 @@ That's the whole design. The core loop is ~50 lines; everything else is the part
 - **Three tiers:** `SAFE` (runs), `ASK` (prompt), `BLOCK` (refused, not whitelistable).
 - **Per-command classification** for shell — `rm -r`, `sudo`, `chmod -R`, `killall`, `systemctl`, `shred`, writes to `/etc/` ask; `mkfs`, `dd if=`, `shutdown`, fork bombs are refused outright.
 - **Allowlist file** (`~/.mahoraga/allow`, regex per line) consulted *before* the ASK tier, so blessed commands never nag again. Editable live.
-- **Approval prompt** with `y` / `N` / `a` (always).
+- **Interactive permission card** — when a tool call is sharp, a card opens over the pane: `↑`/`↓` + `enter`, or `y` (allow this for this session) / `a` (whitelist forever) / `n` (deny), or `1`/`2`/`3`.
 - **Append-only audit log** (`~/.mahoraga/audit.jsonl`) — every call, allowed or denied, with args and outcome.
 - **`--yolo`** skips ASK prompts. It does **not** skip BLOCK: disk-destruction commands are still refused.
 
@@ -115,6 +115,7 @@ python3 -m mahoraga
 
 **Keys:** `Enter` send · `↑`/`↓` history · `Tab` complete · `PgUp`/`PgDn` scroll ·
 `Ctrl+O` expand tool output · `Ctrl+C` stop the reply (or clear an idle line) · `Ctrl+D` quit.
+On the permission card: `↑`/`↓` move · `enter` confirm · `y`/`a`/`n` or `1`/`2`/`3` answer · `esc` deny.
 
 ---
 
@@ -123,7 +124,7 @@ python3 -m mahoraga
 | Tier | Examples | Behaviour |
 |---|---|---|
 | `SAFE` | `read_file`, `list_dir`, `search_files`, `http_get` | runs, audited |
-| `ASK` | `rm -r`, `sudo`, `systemctl`, `killall`, `chmod -R`, writes to `/etc/` | prompts `Allow? [y/N/a]` |
+| `ASK` | `rm -r`, `sudo`, `systemctl`, `killall`, `chmod -R`, writes to `/etc/` | opens the permission card — this session · whitelist · deny |
 | `BLOCK` | `mkfs`, `dd if=`, `> /dev/sdX`, `shutdown`, `reboot`, fork bombs | refused; cannot be whitelisted |
 
 Whitelisting, three ways:
@@ -131,7 +132,8 @@ Whitelisting, three ways:
 ```bash
 /allow pkill -f firefox      # in the TUI — regex, one per line
 /allow rm 2                  # remove rule 2
-# or answer "a" at a prompt, or edit ~/.mahoraga/allow directly (applies live)
+# or pick "Allow this to whitelist" on the card, or edit ~/.mahoraga/allow
+# directly (applies live)
 ```
 
 ---

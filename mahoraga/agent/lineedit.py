@@ -38,6 +38,22 @@ def read_byte(fd: int, timeout: float | None = None) -> bytes:
         return b""
 
 
+def read_byte_poll(fd: int, timeout: float):
+    """One byte within `timeout` seconds, or None if the wait merely expired.
+
+    Distinct from read_byte on purpose: there b"" means timeout, EOF *or* error,
+    which is right for the 50 ms escape-sequence deadline but wrong for a poll —
+    an idle moment must never be mistaken for a closed stdin.
+    """
+    r, _, _ = select.select([fd], [], [], timeout)
+    if not r:
+        return None
+    try:
+        return os.read(fd, 1)
+    except OSError:
+        return b""
+
+
 def decode_key(reader) -> tuple[str, str]:
     """Pull one keypress out of `reader` (callable -> one byte, b'' on timeout/EOF).
     Returns (action, text). Escape sequences are resolved in full; a lone ESC
@@ -218,7 +234,7 @@ class LineEditor:
     def __init__(self, redraw, history: list[str] | None = None,
                  completer=None, on_options=None,
                  on_scroll=None, on_follow=None, on_expand=None,
-                 on_interrupt=None):
+                 on_interrupt=None, on_approval=None, poll=None):
         self.redraw = redraw          # (prompt, buf, cur) -> paints the row
         self.state = LineState(history)
         self.completer = completer
@@ -228,6 +244,10 @@ class LineEditor:
         self.on_expand = on_expand    # () -> None; toggle tool-output expand
         # () -> bool; True = it handled the ^C (stopped a reply), False = clear line
         self.on_interrupt = on_interrupt
+        # () -> bool; called when the key wait times out, so a tool call can
+        # open its approval card without a second thread reading stdin.
+        self.on_approval = on_approval
+        self.poll = poll              # seconds; None = block forever (old behaviour)
 
     def read(self, prompt: str) -> str:
         """Edit one line. Tty is expected in cbreak+noecho (set_raw by the app).
@@ -243,7 +263,15 @@ class LineEditor:
         st = self.state
         self.redraw(prompt, st.buf, st.cur)
         while True:
-            first = read_byte(fd)                 # blocks until a keypress
+            if self.poll is None:
+                first = read_byte(fd)
+            else:
+                first = read_byte_poll(fd, self.poll)
+                if first is None:             # waited, nothing typed: not EOF
+                    if self.on_approval and self.on_approval():
+                        # a card may have taken the cursor; put it back
+                        self.redraw(prompt, st.buf, st.cur)
+                    continue
             if not first:
                 raise EOFError                    # stdin closed -> clean exit
             queue = [first]

@@ -51,6 +51,34 @@ def allow_path() -> str:
     return ALLOW_PATH
 
 
+# session-only grants: commands the user blessed with "allow this for this
+# session" on the approval card. In memory, dies with the process — that is the
+# whole point of the option. shell_risk checks BLOCK first, so a session grant
+# can never open a hard refusal.
+_session_seen: set = set()
+_session_rules: list = []
+
+
+def allow_session(command: str) -> bool:
+    """Remember this exact command as allowed until Mahoraga exits."""
+    if not command or command in _session_seen:
+        return False
+    _session_seen.add(command)
+    _session_rules.append(re.compile(re.escape(command)))
+    return True
+
+
+def session_match(command: str) -> bool:
+    """True if this exact command was allowed earlier in the session."""
+    return any(rx.search(command) for rx in _session_rules)
+
+
+def clear_session() -> None:
+    """Forget every session grant (test hook)."""
+    _session_seen.clear()
+    _session_rules.clear()
+
+
 def _load_allow() -> list:
     try:
         mtime = os.path.getmtime(ALLOW_PATH)
@@ -132,12 +160,12 @@ def remove_allow(which: str) -> bool:
 def shell_risk(command: str) -> str:
     """Classify a shell command: SAFE, ASK, or BLOCK.
 
-    Order: hard refusals (BLOCK) > user whitelist (SAFE) > ask-first (ASK).
+    Order: hard refusals (BLOCK) > session grants > user whitelist > ask-first.
     """
     for rx in _BLOCK_RE:
         if rx.search(command):
             return BLOCK
-    if allow_match(command):
+    if session_match(command) or allow_match(command):
         return SAFE
     for rx in _ASK_RE:
         if rx.search(command):

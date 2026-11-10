@@ -24,6 +24,7 @@ from ..core.wheel import _make_frame, HIDE_CURSOR, SHOW_CURSOR, RESET
 from ..policy import approval
 from .lineedit import LineEditor, complete, set_raw, restore
 from .picker import Picker, window_slice
+from .approve import ApprovalDialog
 from .markdown import render as md_render
 
 BOLD = "\033[1m"; DIM = "\033[2m"; CYAN = "\033[36m"; GOLD = "\033[33m"
@@ -264,6 +265,7 @@ class Screen:
         self.modal = False              # a picker owns the pane: don't repaint it
         self.resize_pending = threading.Event()
         self._input_snapshot = ("", "", 0)   # prompt, buf, cur for repaints
+        self.approval_q = queue.Queue()  # tool calls waiting on the human
 
     # ---- lifecycle ----
 
@@ -288,6 +290,7 @@ class Screen:
         self._dirty.set()
 
     def leave(self):
+        self._settle_approvals()        # a worker must never hang on the way out
         self._wheel_stop.set()
         if self._saved_tty is not None:
             restore(sys.stdin.fileno(), self._saved_tty)
@@ -604,15 +607,20 @@ class Screen:
 
     def input_line(self, prompt: str, history: list | None = None,
                    completer=None, on_options=None, on_expand=None,
-                   on_interrupt=None) -> str:
+                   on_interrupt=None, on_approval=None, poll=0.25) -> str:
         """Bottom-row prompt with line editing: arrows, history (UP/DOWN),
-        tab completion. The wheel keeps spinning above it."""
+        tab completion. The wheel keeps spinning above it.
+
+        `poll` (seconds) wakes the loop when idle so `on_approval` can open the
+        permission card; None restores the old block-forever behaviour.
+        """
         editor = LineEditor(self._redraw_input, history=history,
                             completer=completer, on_options=on_options,
                             on_scroll=self.scroll_by,
                             on_follow=self.scroll_follow,
                             on_expand=on_expand,
-                            on_interrupt=on_interrupt)
+                            on_interrupt=on_interrupt,
+                            on_approval=on_approval, poll=poll)
         sys.stdout.write(SHOW_CURSOR + CURSOR_BLINK)
         sys.stdout.flush()
         try:
@@ -640,6 +648,51 @@ class Screen:
 
     def kick(self):
         self._dirty.set()
+
+    # ---- tool-call approval (the interactive permission card) ----
+
+    def request_approval(self, tool_name: str, args: dict) -> str:
+        """Worker thread: ask the human and block until they answer.
+
+        Returns "session", "always" or "deny". The input thread picks the
+        request up in approval_tick() and opens the card.
+        """
+        done = threading.Event()
+        req = {"tool": tool_name, "args": args, "done": done, "result": "deny"}
+        self.approval_q.put(req)
+        done.wait()
+        return req["result"]
+
+    def approval_tick(self) -> bool:
+        """Input thread: if a tool call is waiting, open the card and wait.
+
+        Called from the line editor's poll, so the same thread that owns stdin
+        reads the answer — no second reader, no race with the prompt.
+        """
+        try:
+            req = self.approval_q.get_nowait()
+        except queue.Empty:
+            return False
+        try:
+            choice = ApprovalDialog(self, req["tool"], req["args"]).run()
+        except BaseException:
+            # The tty keeps ISIG on, so ^C can arrive as SIGINT mid-paint and
+            # unwind the card. Whatever happens, the worker is blocked on this
+            # request and must always be answered.
+            choice = "deny"
+        req["result"] = choice or "deny"
+        req["done"].set()
+        return True
+
+    def _settle_approvals(self, choice: str = "deny"):
+        """Answer everything still waiting (shutdown) so no worker hangs."""
+        while True:
+            try:
+                req = self.approval_q.get_nowait()
+            except queue.Empty:
+                return
+            req["result"] = choice
+            req["done"].set()
 
     def pick(self, title: str, items: list[dict], footer: str = "",
              refresh=None):
@@ -752,6 +805,10 @@ def cli():
         screen.status = "working…"
         screen.kick()
     approval.after_prompt = _post_prompt
+    # The card needs the input thread's key loop, which only exists on a tty;
+    # a pipe falls back to approval's plain stdin prompt.
+    if sys.stdin.isatty():
+        approval.ui_ask = screen.request_approval
 
     # ---- input history (persisted) + tab completion ----
     import pathlib
@@ -1005,7 +1062,9 @@ def cli():
                                      completer=completer,
                                      on_options=on_options,
                                      on_expand=screen.toggle_tools,
-                                     on_interrupt=handle_interrupt).strip()
+                                     on_interrupt=handle_interrupt,
+                                     on_approval=screen.approval_tick,
+                                     poll=0.25).strip()
         except KeyboardInterrupt:
             # The tty keeps ISIG on, so ^C arrives as SIGINT here rather than as
             # a byte the editor can decode. Route it through the same handler:

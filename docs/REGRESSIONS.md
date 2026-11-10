@@ -37,6 +37,7 @@ test for anything new; if a fix has no test, it will regress.
 | 17 | `/key <oc_sk_…>` answered "can't tell which service that key is for" | the catalog had no OpenCode entry, so a Zen/Go key had no provider to land in | added `opencode` to the catalog — exact `oc_sk_`, weak `sk-`, free-tier model presets, listing never trusted | `test_keycmd.py` |
 | 18 | A Cloudflare-fronted provider (OpenCode) listed **0 models**, then every call failed | urllib's default User-Agent is on Cloudflare's block list — 403 `error code: 1010` — and the client sent no User-Agent of its own | send `User-Agent: mahoraga/1.0` on every request | `test_baseurl.py` |
 | 19 | A table's content was trimmed — a "Summary" column read `Routes incoming requests to b…` and the rest of the answer never showed | `_render_table` capped every column at 30 chars and ellipsized anything longer; a table wider than the pane had its columns crushed to 6 chars and could still overflow it | cells wrap inside their column instead of being cut; the 30-char cap and the `max(20, width)` floor are gone, and the shrink loop fits the table to the pane | `test_markdown.py` |
+| 20 | The permission prompt was dead — nothing echoed, arrows leaked as `^[[A`, and the pane repainted behind it | `print` + `input()` ran on the **worker** thread, but the tty is cbreak+noecho (so `input()` echoes nothing and hands back raw bytes) and the render thread owns the screen; it also offered only y/n, never "this session" vs "whitelist" | an interactive card (`agent/approve.py`) painted on the **input** thread: ↑↓ + enter, or `y`/`a`/`n`, or `1`/`2`/`3` — allow for this session, whitelist forever, or deny; the line editor polls for pending approvals and the worker blocks on an event; `--yolo` still skips it | `test_approval.py` + `test_approval_tui.py` |
 
 ## Modal windows (pickers)
 
@@ -54,6 +55,11 @@ corrupting the screen, and both already had a bug behind them elsewhere:
 The window maths (`window_slice`) is pure and tested in `test_picker.py`; the
 key handling is only provable in a terminal, so `test_key_tui.py` drives the
 real app with arrow keys.
+
+The permission card (`agent/approve.py`) is a third modal and follows the same
+two rules — but it is opened by the *input* thread from the line editor's poll,
+because the tool call that wants permission is blocking a worker thread. The
+worker never reads stdin itself: it hands the request to the queue and waits.
 
 ## Testing a TUI change
 

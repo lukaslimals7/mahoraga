@@ -69,6 +69,19 @@ check("remove by text", P.remove_allow(r"^pkill\s+-f\s+chrome"), True)
 check("empty after removals", P.list_allow(), [])
 check("remove missing returns False", P.remove_allow("9"), False)
 
+# --- session grants: in-memory, per command, and BLOCK still wins -----------
+P.allow_session("killall -9 firefox")
+check("session grant makes it SAFE", P.shell_risk("killall -9 firefox"), P.SAFE)
+check("session grant is per command", P.shell_risk("killall firefox"), P.ASK)
+check("duplicate session grant is ignored",
+      P.allow_session("killall -9 firefox"), False)
+P.allow_session("shutdown -h now")
+check("a session grant cannot override BLOCK",
+      P.shell_risk("shutdown -h now"), P.BLOCK)
+P.clear_session()
+check("clear_session forgets the grant",
+      P.shell_risk("killall -9 firefox"), P.ASK)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED: {fails}")

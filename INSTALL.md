@@ -39,22 +39,24 @@ cd mahoraga
 Run every gauntlet. Expected results, one per line:
 
 ```bash
-for t in test_allow test_loop test_render test_input test_shell_session; do
+for t in test_allow test_approval test_loop test_render test_input test_shell_session; do
   printf '%-22s ' "$t"; python3 tests/$t.py | tail -1
 done
 ```
 
 ```
 test_allow             all whitelist checks passed
+test_approval          all approval checks passed
 test_loop              === ALL CHECKS PASSED ===
 test_render            RENDER GAUNTLET: ALL OK
 test_input             INPUT GAUNTLET: ALL OK
 test_shell_session     SHELL SESSION: ALL OK
 ```
 
-If all five pass, the install is sound — the rest is just pointing it at a
+If all six pass, the install is sound — the rest is just pointing it at a
 model. (These tests cover the renderer, the line editor, the agent loop, the
-permission tiers and the persistent shell session; they need no network.)
+permission tiers, the permission card and the persistent shell session; they
+need no network.)
 
 ---
 
@@ -255,7 +257,7 @@ list the files here     → a green tool card with real output
 | `Tab` | complete commands / providers / models |
 | `Ctrl+O` | expand/collapse long tool output |
 | `PgUp` / `PgDn` | scroll the pane (typing jumps back to live) |
-| `a` at a danger prompt | whitelist that exact command forever |
+| permission card | `↑`/`↓` move · `enter` confirm · `y` this session · `a` whitelist · `n` / `esc` deny |
 
 ---
 
@@ -280,13 +282,14 @@ Nothing outside `~/.mahoraga/` and the repo directory is touched.
 
 Philosophy: **run everything, question only danger.**
 
-- `ASK` tier → prompts `Allow? [y/N/a]` (e.g. `rm -r`, `sudo`, `killall`,
-  `systemctl`, `chmod -R`).
+- `ASK` tier → opens the **permission card** (e.g. `rm -r`, `sudo`, `killall`,
+  `systemctl`, `chmod -R`). It shows the exact command and three answers.
 - `BLOCK` tier → refused outright and **cannot be whitelisted**: `mkfs`,
   `dd if=`, `> /dev/sdX`, `shutdown`/`reboot`, `kill -9 -1`, fork bombs,
   `rm -rf /`. Disk/system destruction only.
 
-Three ways to whitelist, all persistent:
+Three ways to whitelist, all persistent — plus one answer that is deliberately
+*not*:
 
 ```
 /allow pkill -f firefox     # in the TUI (regex)
@@ -294,7 +297,11 @@ Three ways to whitelist, all persistent:
 /allow rm 2                 # remove rule 2
 ```
 
-- Press **`a`** at a danger prompt → whitelists that exact command forever.
+- On the card: **`y`** (or `1`) allows that exact command **for this session
+  only** — nothing is written to disk, and the grant dies with the process.
+- On the card: **`a`** (or `2`) whitelists that exact command forever.
+- **`n`** (or `3`, or `esc`) refuses the call; the model is told and can try
+  another way.
 - Or edit `~/.mahoraga/allow` directly; changes apply live (no restart).
 
 ---
