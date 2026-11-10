@@ -76,8 +76,57 @@ narrow = render(MODEL_OUTPUT, width=34)
 check("narrow: fits 34 cols", all(_w(l) <= 34 for l in narrow.split("\n")),
       str(max(_w(l) for l in narrow.split("\n"))))
 check("narrow: still no pipes", "|" not in narrow)
-check("narrow: ellipsized", "…" in narrow or all(
-    _w(l) <= 34 for l in narrow.split("\n")))
+check("narrow: wraps instead of ellipsizing",
+      "…" not in narrow and all(_w(l) <= 34 for l in narrow.split("\n")))
+
+# ---- a wide content column must wrap, never be ellipsized ---------------
+# The regression: a "Summary" column was capped at 30 chars and cut with an
+# ellipsis, so the very information the model was asked for never showed.
+summary_md = """| Component | Summary |
+|---|---|
+| api-gateway | Routes incoming requests to backend services, applies rate limits, and terminates TLS |
+| auth-service | Issues and validates JWT tokens, handles refresh, and stores sessions in Redis |
+"""
+sout = render(summary_md, width=110)
+check("summary: no ellipsis", "…" not in sout)
+check("summary: every word survives",
+      all(w in sout for w in ("Routes", "rate", "limits", "terminates",
+                              "refresh", "Redis")), "")
+check("summary: fits the pane", all(_w(l) <= 110 for l in sout.split("\n")),
+      str(max(_w(l) for l in sout.split("\n"))))
+
+# narrow pane: the same column wraps to the pane instead of being cut
+narrow_sum = render(summary_md, width=40)
+check("summary narrow: no ellipsis", "…" not in narrow_sum)
+check("summary narrow: fits 40 cols",
+      all(_w(l) <= 40 for l in narrow_sum.split("\n")),
+      str(max(_w(l) for l in narrow_sum.split("\n"))))
+
+# continuation lines line up under their own column
+nlines = [visible(l) for l in narrow_sum.split("\n")]
+i = next(i for i, l in enumerate(nlines) if l.strip().startswith("api-gateway"))
+col = nlines[i].index("Routes")
+check("summary: wrapped line aligns under its column",
+      nlines[i + 1].startswith(" " * col), repr(nlines[i + 1]))
+
+# ---- a table can never be wider than the pane --------------------------
+# More columns than fit: they wrap narrow rather than clipping off the edge.
+wide_md = ("| " + " | ".join(f"column{i}" for i in range(12)) + " |\n"
+           + "|" + "---|" * 12 + "\n"
+           + "| " + " | ".join("some long-ish value" for _ in range(12)) + " |")
+wide = render(wide_md, width=60)
+check("wide table: fits the pane", all(_w(l) <= 60 for l in wide.split("\n")),
+      str(max(_w(l) for l in wide.split("\n"))))
+check("wide table: no ellipsis", "…" not in wide)
+
+# ---- render() must never return a table wider than the width it was given -
+# (a `max(20, width)` floor used to break the contract below 20 columns)
+narrow_table = "| Folder | Size |\n|---|---|\n| iso-project | 50G |\n| gyaanix-v1 | 17G |"
+for w in (8, 12, 16, 19, 20, 40):
+    r = render(narrow_table, width=w)
+    check(f"table width {w}: nothing wider than requested",
+          all(_w(l) <= w for l in r.split("\n")),
+          str(max(_w(l) for l in r.split("\n"))))
 
 # ---- inline styles -----------------------------------------------------
 inline = render("# Heading\n\nSome **bold** and *italic* and `code`.\n"

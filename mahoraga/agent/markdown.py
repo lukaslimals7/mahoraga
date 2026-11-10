@@ -5,7 +5,7 @@ Models answer in markdown; a terminal that prints raw markdown looks broken
 module turns the markdown the model *writes* into the text a human *reads*:
 
 - tables  → aligned columns, bold header, rule, numeric right-alignment;
-            shrunk and ellipsized to fit the pane instead of wrapping
+            columns share the pane width and cells wrap — nothing is ellipsized
 - headings → bold
 - bullets  → •
 - quotes   → │
@@ -83,8 +83,51 @@ def _inline(s: str) -> str:
     return s.rstrip()
 
 
+def _chunk(s: str, width: int) -> list[str]:
+    """Hard-break a string into pieces of at most `width` visual columns."""
+    out: list[str] = []
+    cur = ""
+    w = 0
+    for ch in s:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > width and cur:
+            out.append(cur)
+            cur, w = "", 0
+        cur += ch
+        w += cw
+    out.append(cur)
+    return out or [""]
+
+
+def _wrap_cell(text: str, width: int) -> list[str]:
+    """Wrap one cell to `width` visual columns: word-wise, hard-breaking a word
+    that is wider than the column on its own.
+
+    A cell carries the table's meaning (a "Summary" column is the whole point),
+    so it wraps onto extra rows instead of being cut with an ellipsis.
+    """
+    width = max(1, width)
+    lines: list[str] = []
+    cur = ""
+    for word in text.split():
+        for piece in (_chunk(word, width) if _w(word) > width else [word]):
+            cand = f"{cur} {piece}" if cur else piece
+            if _w(cand) > width and cur:
+                lines.append(cur)
+                cur = piece
+            else:
+                cur = cand
+    lines.append(cur)
+    return lines or [""]
+
+
 def _render_table(rows: list[str], width: int) -> list[str]:
-    """Aligned columns: bold header, ─── rule, numeric columns right-aligned."""
+    """Aligned columns: bold header, ─── rule, numeric columns right-aligned.
+
+    A column takes the width its content needs — the shrink loop still fits the
+    table to the pane — and cells wrap inside their column, so no information is
+    dropped.
+    """
     body = [r for r in rows if not _is_sep_row(r)] or rows
     grid = [_cells(r) for r in body]
     ncols = max(len(r) for r in grid)
@@ -95,36 +138,37 @@ def _render_table(rows: list[str], width: int) -> list[str]:
     w = []
     for c in range(ncols):
         natural = max([_w(header[c])] + [_w(v) for v in cols[c]] or [1])
-        w.append(min(natural, 30))
+        w.append(natural)
     right = [bool(cols[c]) and all(_is_num(v) for v in cols[c]) and any(cols[c])
              for c in range(ncols)]
 
     total = sum(w) + 2 * (ncols - 1)
-    while total > width and max(w) > 6:          # shrink the widest column
+    # Shrink the widest column until the table fits. Cells wrap, so a narrow
+    # column costs height, not information — overflowing the pane would clip
+    # whole columns off the right edge, which is the same loss by another name.
+    while total > width and max(w) > 1:
         i = w.index(max(w))
         w[i] -= 1
         total -= 1
 
-    def cell(text: str, c: int) -> str:
-        t = _plain(text)
-        if _w(t) > w[c]:
-            t = t[: max(1, w[c] - 1)] + "…"
-        t = t + " " * max(0, w[c] - _w(t))
-        return t if right[c] else t
+    def row_lines(cells_: list[str], bold: bool) -> list[str]:
+        """One logical row → as many physical rows as its tallest cell needs."""
+        wrapped = [_wrap_cell(_plain(cells_[c]), w[c]) for c in range(ncols)]
+        out = []
+        for i in range(max(len(x) for x in wrapped)):
+            parts = []
+            for c in range(ncols):
+                t = wrapped[c][i] if i < len(wrapped[c]) else ""
+                pad = " " * max(0, w[c] - _w(t))
+                parts.append(pad + t if right[c] else t + pad)
+            row = "  ".join(parts).rstrip()
+            out.append(f"{BOLD}{row}{R0}" if bold else row)
+        return out
 
-    def line_of(cells_: list[str], bold: bool) -> str:
-        parts = []
-        for c, raw in enumerate(cells_):
-            t = _plain(raw)
-            if _w(t) > w[c]:
-                t = t[: max(1, w[c] - 1)] + "…"
-            pad = " " * max(0, w[c] - _w(t))
-            parts.append(pad + t if right[c] else t + pad)
-        row = "  ".join(parts).rstrip()
-        return f"{BOLD}{row}{R0}" if bold else row
-
-    out = [line_of(header, True), f"{DIM}{'─' * min(total, width)}{R0}"]
-    out += [line_of(r, False) for r in data]
+    out = row_lines(header, True)
+    out.append(f"{DIM}{'─' * min(total, width)}{R0}")
+    for r in data:
+        out += row_lines(r, False)
     return out
 
 
@@ -143,7 +187,7 @@ def render(text: str, width: int = 100, tables: bool = True) -> str:
                 i += 1
             has_sep = any(_is_sep_row(b) for b in block)
             if len(block) >= 2 and (has_sep or all(_is_row(b) for b in block)):
-                out.extend(_render_table(block, max(20, width)))
+                out.extend(_render_table(block, width))
             else:
                 out.extend(_inline(l) for l in block)
             continue
