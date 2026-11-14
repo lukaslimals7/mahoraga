@@ -36,7 +36,7 @@ assert all(desc for _, _, desc in COMMAND_SPEC), "every command needs a one-line
 assert set(STATIC_ARG_POOL) <= set(names), f"arg pool for unknown command: {set(STATIC_ARG_POOL) - set(names)}"
 
 # commands whose argument is free text / discovered at runtime
-DYNAMIC = {"/provider", "/model", "/allow", "/cd"}
+DYNAMIC = {"/provider", "/model", "/allow", "/cd", "/skill"}
 for name, hint, _ in COMMAND_SPEC:
     if hint and name not in DYNAMIC:
         assert name in STATIC_ARG_POOL, f"{name} declares an argument but offers no candidates"

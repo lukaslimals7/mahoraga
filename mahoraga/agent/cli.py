@@ -97,8 +97,10 @@ COMMAND_SPEC: list[tuple[str, str, str]] = [
     ("/cd", "<path>", "change the shell working dir (persists)"),
     ("/pwd", "", "where the shell runs"),
     ("/mouse", "on|off", "wheel-scroll the pane (off = native copy/paste)"),
-    ("/memory", "", "recent stored messages"),
+    ("/memory", "[show|edit|export|import]", "recent turns · show/edit files · export/import"),
     ("/clear", "", "wipe stored memory"),
+    ("/skills", "[show|import|rm]", "list / show / import / remove skills"),
+    ("/skill", "<name>", "load a skill into this session"),
 ]
 # Fixed candidate words per command — data, so it can be tested and cannot drift
 # silently the way the old inline branch chain did.
@@ -109,6 +111,8 @@ STATIC_ARG_POOL: dict[str, list[str]] = {
     "/tools": ["on", "off"],
     "/wheel": ["sticky", "auto", "full"],
     "/allow": ["rm"],
+    "/memory": ["show", "edit", "export", "import"],
+    "/skills": ["show", "import", "rm"],
 }
 COMMAND_ALIASES = {"/exit": "/quit", "/q": "/quit"}
 COMMAND_NAMES = [name for name, _, _ in COMMAND_SPEC] + list(COMMAND_ALIASES)
@@ -845,8 +849,6 @@ def cli():
     except OSError:
         history = []
 
-    COMMANDS = ["/help", "/quit", "/exit", "/q", "/new", "/provider",
-                "/model", "/tools", "/allow", "/memory", "/clear", "/stop"]
     model_cache = {"t": 0.0, "list": []}
 
     def arg_pool(cmd: str) -> list[str]:
@@ -865,6 +867,8 @@ def cli():
         if cmd == "/allow rm":
             from ..policy import permissions as _perm
             return [str(i) for i in range(1, len(_perm.list_allow()) + 1)]
+        if cmd == "/skill":
+            return agent.skills.names()
         return []
 
     def completer(buf, cur):
@@ -1133,6 +1137,10 @@ def cli():
                            f"yolo: python -m mahoraga --yolo{R0}")
                 screen.say(f"{DIM}/model and /provider open a list: ↑↓ move, enter pick, "
                            f"type to filter, esc cancel{R0}")
+                screen.say(f"{DIM}memory is always on: memory.md + user.md are injected "
+                           f"every turn · /memory show|edit|export|import{R0}")
+                screen.say(f"{DIM}skills: /skills list · /skills import <path|url> · "
+                           f"/skill <name> loads one{R0}")
             elif cmd == "/new":
                 agent.new_session()
                 screen.say(f"{DIM}context cleared{R0}")
@@ -1343,9 +1351,113 @@ def cli():
                     screen.say(f"{DIM}{'whitelisted: ' + arg if ok else 'already whitelisted or invalid regex'}{R0}")
             elif cmd == "/memory":
                 from ..memory import sqlite as mem
-                for role, content in mem.load_recent(10):
-                    tag = f"{GOLD}you{R0}" if role == "user" else f"{CYAN}mahoraga{R0}"
-                    screen.say(f"{tag}: {content[:90]}")
+                sub, _, rest = arg.partition(" ")
+                sub = sub.strip().lower()
+                if sub == "show":
+                    screen.say(f"{BOLD}memory{R0} {DIM}{agent.memory.dir}{R0}")
+                    for name, title in (("memory.md", "PERSISTENT MEMORY"),
+                                        ("user.md", "USER PROFILE")):
+                        body = agent.memory.read(name).strip()
+                        screen.say(f"{CYAN}{name}{R0} {DIM}{title} · {len(body)} chars{R0}")
+                        lines = (body or "(empty)").splitlines()
+                        for line in lines[:15]:
+                            screen.say(f"  {line[:100]}")
+                        if len(lines) > 15:
+                            screen.say(f"  {DIM}… {len(lines) - 15} more lines{R0}")
+                    screen.say(f"{DIM}/memory edit <file> · export <path> · import <path>{R0}")
+                elif sub == "edit":
+                    which = rest.strip() or "memory.md"
+                    try:
+                        path = agent.memory.path(which)
+                    except ValueError as e:
+                        screen.say(f"{RED}{e}{R0}")
+                    else:
+                        screen.leave()
+                        try:
+                            import subprocess as _sp
+                            _sp.run([os.environ.get("EDITOR", "vi"), str(path)])
+                        finally:
+                            screen.enter()
+                        agent.refresh_system()
+                        screen.say(f"{DIM}edited {path}{R0}")
+                elif sub == "export":
+                    if not rest.strip():
+                        screen.say(f"{DIM}usage: /memory export <path>{R0}")
+                    else:
+                        try:
+                            p = agent.memory_export(rest.strip())
+                        except OSError as e:
+                            screen.say(f"{RED}✗ {e}{R0}")
+                        else:
+                            screen.say(f"{GREEN}✓{R0} exported to {DIM}{p}{R0}")
+                elif sub == "import":
+                    if not rest.strip():
+                        screen.say(f"{DIM}usage: /memory import <path>{R0}")
+                    else:
+                        try:
+                            rep = agent.memory_import(rest.strip())
+                        except Exception as e:
+                            screen.say(f"{RED}✗ {e}{R0}")
+                        else:
+                            wrote = ", ".join(rep["written"]) or "nothing"
+                            screen.say(f"{GREEN}✓{R0} imported {wrote} {DIM}← {rep['source']}{R0}")
+                else:
+                    for role, content in mem.load_recent(10):
+                        tag = f"{GOLD}you{R0}" if role == "user" else f"{CYAN}mahoraga{R0}"
+                        screen.say(f"{tag}: {content[:90]}")
+                    screen.say(f"{DIM}/memory show · edit · export · import{R0}")
+            elif cmd == "/skills":
+                sub, _, rest = arg.partition(" ")
+                sub = sub.strip().lower()
+                items = agent.skills_list()
+                if sub == "show":
+                    try:
+                        text = agent.skills_show(rest.strip())
+                    except ValueError as e:
+                        screen.say(f"{RED}{e}{R0}")
+                    else:
+                        screen.say(f"{BOLD}skill{R0}")
+                        for line in text.splitlines():
+                            screen.say(line)
+                elif sub == "import":
+                    src = rest.strip()
+                    if not src:
+                        screen.say(f"{DIM}usage: /skills import <path-or-url>{R0}")
+                    else:
+                        try:
+                            rep = agent.skills_install(src)
+                        except Exception as e:
+                            screen.say(f"{RED}✗ {e}{R0}")
+                        else:
+                            screen.say(f"{GREEN}✓{R0} installed {BOLD}{rep['name']}{R0} "
+                                       f"{DIM}→ {rep['path']}{R0}")
+                elif sub == "rm":
+                    name = rest.strip()
+                    ok = agent.skills_remove(name)
+                    screen.say(f"{DIM}{'removed: ' + name if ok else 'no such skill: ' + name}"
+                               f"{R0}")
+                else:
+                    if not items:
+                        screen.say(f"{DIM}no skills — /skills import <path-or-url>{R0}")
+                    else:
+                        screen.say(f"{BOLD}skills{R0} {DIM}{len(items)} installed{R0}")
+                        for s in items:
+                            tag = f"{DIM}[bundled]{R0}" if s["bundled"] else ""
+                            screen.say(f"  {CYAN}•{R0} {s['name']} "
+                                       f"{DIM}{s['description'][:70]}{R0} {tag}")
+                        screen.say(f"{DIM}/skill <name> loads one · /skills show <name> prints it{R0}")
+            elif cmd == "/skill":
+                name = arg.strip()
+                if not name:
+                    screen.say(f"{DIM}usage: /skill <name> — /skills lists them{R0}")
+                else:
+                    try:
+                        agent.skill_load(name)
+                    except ValueError as e:
+                        screen.say(f"{RED}{e}{R0}")
+                    else:
+                        screen.say(f"{GREEN}✓{R0} loaded {BOLD}{name}{R0} "
+                                   f"{DIM}into this session{R0}")
             elif cmd == "/clear":
                 from ..memory import sqlite as mem
                 mem.clear_messages()

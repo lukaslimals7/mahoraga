@@ -59,7 +59,8 @@ That's the whole design. The core loop is ~50 lines; everything else is the part
 - Shell: `shell`, `bash`, `run_command` (persistent session — `cd` sticks), `process_manage` (background jobs)
 - Files: `read_file`, `write_file`, `edit_file`, `list_dir`, `search_files`
 - Web: `http_get`, `web_search`, `web_extract`
-- Memory: `remember`, `recall`, `session_search`
+- Memory: `remember`, `recall`, `memory_read`, `session_search`
+- Skills: `list_skills`, `load_skill`
 - Notes: `get_notes`, `set_notes`
 - Utility: `todo_list`, `clarify`, `estimate_tokens`
 
@@ -71,9 +72,31 @@ That's the whole design. The core loop is ~50 lines; everything else is the part
 - **`/key <paste>`** — paste an API key and it writes the provider block into `config.json`, the secret into `.env` (mode 600), then **proves which model the key can really call** with a one-token completion before switching. No hand-editing JSON, and no 404s from a model the account was never granted.
 
 ### Memory
-- Every turn persisted to SQLite (`~/.mahoraga/memory.db`), last 30 replayed on launch.
-- **WAL mode + thread-local connections**, so background turns and the UI can read/write at once.
-- `/new` clears context without deleting history; `/memory` shows recent turns; `/clear` wipes the store.
+- **Always-on memory files** — `~/.mahoraga/memory.md` (cross-session facts) and
+  `~/.mahoraga/user.md` (who you are, how you work) are injected into the system
+  prompt on **every** turn. Plain text, editable by hand, diffable.
+- **A per-file budget** (default 2,000 chars) keeps a long memory from crowding out
+  the conversation; the block is truncated with a marker rather than dropped.
+- **Import / export** — `/memory export <path>` writes one JSON bundle (or a
+  directory of the two files); `/memory import <path>` reads it back. Move your
+  memory between machines, or keep it in git.
+- **Model-facing tools** — `remember` appends a fact, `recall` searches both files,
+  `memory_read` returns them whole.
+- **Conversation history** — every turn also lands in SQLite (`~/.mahoraga/memory.db`),
+  last 30 replayed on launch. `/memory` shows recent turns, `/clear` wipes them.
+  History is the log; the files are what the model *knows*.
+
+### Skills
+- **Plain Markdown skills** — a skill is a folder with a `SKILL.md` (frontmatter
+  `name` + `description`, then the instructions). No code, no dependencies.
+- **Two sources** — `~/.mahoraga/skills/` (yours) and the bundled `mahoraga/skills/`.
+  A user skill with the same name overrides the bundled one.
+- **On-demand loading** — the list is injected into the prompt; the model calls
+  `load_skill` when a description matches. `/skill <name>` drops one straight into
+  the session.
+- **Import your own** — `/skills import <path|url>` takes a folder, a single
+  `SKILL.md`, or a URL. `/skills`, `/skills show <name>`, `/skills rm <name>`.
+- A template lives at `examples/skills/skill-template/`.
 
 ### Extensibility
 - Register a tool from a plain function — the JSON schema is derived from the signature.
@@ -107,8 +130,10 @@ python3 -m mahoraga
 | `/reasoning on\|off` | show/hide the model's thinking (persisted) |
 | `/wheel` | banner size: `sticky` (default) · `auto` · `full` · a row count (2–28) |
 | `/new` | fresh context, history kept |
-| `/memory` | recent stored turns |
-| `/clear` | wipe stored memory |
+| `/memory` | recent stored turns · `show` · `edit [file]` · `export <path>` · `import <path>` |
+| `/clear` | wipe stored conversation history |
+| `/skills` | list skills · `show <name>` · `import <path\|url>` · `rm <name>` |
+| `/skill` | load a skill into this session |
 | `/cd`, `/pwd` | move the persistent shell's working directory |
 | `/mouse on\|off` | wheel-scroll mode vs native selection |
 | `/quit` | exit |
@@ -181,7 +206,11 @@ mahoraga/
 │   ├── permissions.py   ← SAFE / ASK / BLOCK + allowlist
 │   ├── approval.py      ← the human-in-the-loop prompt
 │   └── audit.py         ← append-only JSONL
-├── memory/sqlite.py     ← WAL, thread-local connections
+├── memory/
+│   ├── sqlite.py         ← WAL, thread-local connections (history)
+│   └── store.py          ← memory.md + user.md, prompt injection, import/export
+├── skills/
+│   └── manager.py        ← SKILL.md discovery, frontmatter, install/remove
 └── agent/
     ├── cli.py           ← the TUI (ANSI, stdlib only)
     ├── lineedit.py      ← raw-mode line editor
@@ -213,6 +242,9 @@ Files it keeps:
 | Path | Contents |
 |---|---|
 | `~/.mahoraga/config.json` | providers, models, limits |
+| `~/.mahoraga/memory.md` | always-on facts, injected every turn |
+| `~/.mahoraga/user.md` | user profile, injected every turn |
+| `~/.mahoraga/skills/` | your skills (`<name>/SKILL.md`) |
 | `~/.mahoraga/memory.db` | conversation history (SQLite, WAL) |
 | `~/.mahoraga/audit.jsonl` | every tool call and its outcome |
 | `~/.mahoraga/allow` | regex whitelist |

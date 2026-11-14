@@ -30,10 +30,16 @@ def _resolve(path: str) -> str:
     p = os.path.expanduser(path)
     return p if os.path.isabs(p) else os.path.join(SHELL_STATE["cwd"], p)
 
-def register_all(reg, data_dir: str = "~/.mahoraga"):
+def register_all(reg, data_dir: str = "~/.mahoraga", memory=None, skills=None):
     d = os.path.expanduser(data_dir)
     os.makedirs(d, exist_ok=True)
     notes_path = os.path.join(d, "notes.md")
+    if memory is None:
+        from ..memory.store import MemoryStore
+        memory = MemoryStore(d)
+    if skills is None:
+        from ..skills.manager import SkillsManager
+        skills = SkillsManager(user_dir=os.path.join(d, "skills"))
 
     def read_file(path: str, max_lines: int = 400) -> str:
         p = _resolve(path)
@@ -188,33 +194,69 @@ def register_all(reg, data_dir: str = "~/.mahoraga"):
         {"type": "object", "properties": {"text": {"type": "string"}},
          "required": ["text"]}, estimate_tokens)
 
-    # ---- long-term memory over the kv table (survives restarts) ----
+    # ---- persistent memory files (always injected into the system prompt) ----
     def remember(fact: str) -> str:
-        import json
-        from ..memory import sqlite as mem
-        facts = json.loads(mem.kv_get("facts", "[]"))
-        facts.append(fact)
-        mem.kv_set("facts", json.dumps(facts, ensure_ascii=False))
-        return f"remembered. {len(facts)} fact(s) stored."
+        memory.append("memory.md", fact)
+        n = len([l for l in memory.read("memory.md").splitlines() if l.strip()])
+        return f"remembered. {n} line(s) in memory.md."
 
     reg.register("remember", "Store an important fact about the user or project "
-        "for future sessions. Use when the user says to remember something.",
+        "in persistent memory. Use when the user says to remember something.",
         {"type": "object", "properties": {
             "fact": {"type": "string", "description": "one self-contained sentence"}},
          "required": ["fact"]}, remember)
 
     def recall(query: str = "") -> str:
-        import json
-        from ..memory import sqlite as mem
-        facts = json.loads(mem.kv_get("facts", "[]"))
-        hits = [f for f in facts if query.lower() in f.lower()] if query else facts
-        return "\n".join(f"- {f}" for f in hits[-20:]) or "no memories yet"
+        hits = []
+        for name in ("memory.md", "user.md"):
+            for line in memory.read(name).splitlines():
+                line = line.strip()
+                if line and (not query or query.lower() in line.lower()):
+                    hits.append(f"[{name}] {line}")
+        return "\n".join(hits[-30:]) or "no memories yet"
 
-    reg.register("recall", "Search stored memories. Call when the user asks "
+    reg.register("recall", "Search persistent memory. Call when the user asks "
         "what you remember, or when a question depends on past context.",
         {"type": "object", "properties": {
             "query": {"type": "string", "description": "keyword filter; empty returns everything"}},
          "required": []}, recall)
+
+    def memory_read() -> str:
+        out = []
+        for name, title in (("memory.md", "PERSISTENT MEMORY"),
+                            ("user.md", "USER PROFILE")):
+            body = memory.read(name).strip()
+            if body:
+                out.append(f"## {title}\n{body}")
+        return "\n\n".join(out) or "(no memory files yet)"
+
+    reg.register("memory_read", "Read the full persistent memory files. Use "
+        "when a task depends on who the user is or what was established before.",
+        {"type": "object", "properties": {}}, memory_read)
+
+    # ---- skills (Markdown instructions loaded on demand) ----
+    def list_skills() -> str:
+        items = skills.all()
+        if not items:
+            return "(no skills installed — /skills import <path-or-url>)"
+        return "\n".join(f"- {s['name']}: {s['description']}" for s in items)
+
+    reg.register("list_skills", "List installed skills. Call when a task looks "
+        "like it might have a skill, before doing it by hand.",
+        {"type": "object", "properties": {}}, list_skills)
+
+    def load_skill(name: str) -> str:
+        s = skills.get(name)
+        if not s:
+            return json.dumps({"error": f"no skill '{name}'",
+                               "available": skills.names()})
+        return s["body"]
+
+    reg.register("load_skill", "Load a skill's full instructions by name. Call "
+        "when the task matches a skill's description.",
+        {"type": "object", "properties": {
+            "name": {"type": "string", "description": "skill name from list_skills"}},
+         "required": ["name"]}, load_skill)
 
     # ---- session history search (the messages table already exists) ----
     def session_search(query: str, limit: int = 10) -> str:

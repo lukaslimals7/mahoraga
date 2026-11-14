@@ -271,10 +271,61 @@ Everything lives in `~/.mahoraga/`:
 | `.env` | *(yours, optional)* API keys, `chmod 600`, gitignored |
 | `allow` | command whitelist — one regex per line (created on first `/allow`) |
 | `memory.db` | SQLite: every turn persisted, restored on next launch |
+| `memory.md` | always-on facts, injected into the prompt every turn |
+| `user.md` | who you are and how you work, injected every turn |
+| `skills/` | your skills, one folder each (`<name>/SKILL.md`) |
 | `history` | prompt history (last 500) |
 | `audit.log` | append-only JSONL of tool executions (created once a tool runs) |
 
 Nothing outside `~/.mahoraga/` and the repo directory is touched.
+
+### Memory
+
+Two plain text files, read at startup and appended to the system prompt on
+**every** turn:
+
+- `memory.md` — facts. One per line. The agent also writes here when you say
+  "remember that…".
+- `user.md` — your profile: name, work, preferences, standing rules.
+
+Each file is capped at 2,000 chars in the prompt (configurable:
+`"memory_budget": 2000` in `config.json`); anything past the cap is truncated
+with a marker, never dropped silently. Edit either file by hand — changes
+apply on the next `/memory edit`, `/memory import`, or restart.
+
+```
+/memory            recent conversation turns
+/memory show       both files, with sizes
+/memory edit user  open $EDITOR on a file
+/memory export ~/mahoraga-backup.json   one JSON bundle
+/memory import ~/mahoraga-backup.json   restore it
+```
+
+A suffix-less export path (or a directory) writes the two `.md` files instead
+of a bundle, and importing a single `.md` loads it as `memory.md`.
+
+### Skills
+
+A skill is a folder with a `SKILL.md` — frontmatter `name` + `description`,
+then the instructions. No code, no dependencies.
+
+```
+/skills                      list them
+/skills show ansi-tui        print one
+/skills import <path|url>    install a folder, a single SKILL.md, or a URL
+/skills rm <name>            remove yours (bundled skills are not deletable)
+/skill <name>                load one into the current session
+```
+
+Your skills live in `~/.mahoraga/skills/`; the model sees the name and
+description of every skill in its prompt and calls `load_skill` when one
+matches. A user skill with the same name as a bundled one wins. A template
+is at `examples/skills/skill-template/`:
+
+```bash
+cp -r examples/skills/skill-template ~/.mahoraga/skills/my-skill
+$EDITOR ~/.mahoraga/skills/my-skill/SKILL.md
+```
 
 ---
 

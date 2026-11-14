@@ -14,6 +14,8 @@ from ..tools.registry import Registry
 from ..llm.openai_compat import OpenAICompat
 from ..plugins import register_all
 from ..memory import sqlite as mem
+from ..memory.store import MemoryStore
+from ..skills.manager import SkillsManager
 
 CONFIG_PATH = pathlib.Path.home() / ".mahoraga" / "config.json"
 
@@ -87,10 +89,13 @@ class Mahoraga:
         self.cfg = self._load_config()
         self.provider = self._make_provider(self.active_name(), self.active_cfg())
         self.registry = Registry()
-        register_all(self.registry, data_dir=str(CONFIG_PATH.parent))
         mem.init()
+        self.memory = MemoryStore(self.cfg_path.parent)
+        self.skills = SkillsManager(user_dir=self.cfg_path.parent / "skills")
+        register_all(self.registry, data_dir=str(self.cfg_path.parent),
+                     memory=self.memory, skills=self.skills)
         self.ctx = Context(
-            system_prompt=self.cfg.get("system", DEFAULT_SYSTEM),
+            system_prompt=self._system_prompt(),
             max_tokens=self.cfg.get("context_window", 8192),
         )
         for role, content in mem.load_recent(30):
@@ -554,3 +559,73 @@ class Mahoraga:
     def new_session(self):
         """Forget the in-memory context (memory db keeps history)."""
         self.ctx.messages.clear()
+
+    # ---- system prompt: base + memory + skills ----
+
+    def _system_prompt(self) -> str:
+        """The base prompt plus the always-on memory files and skill list.
+
+        Rebuilt on demand (`refresh_system`) so editing memory.md or
+        importing a skill takes effect without a restart.
+        """
+        system = self.cfg.get("system", DEFAULT_SYSTEM)
+        mem_block = self.memory.inject(self.cfg.get("memory_budget", 2000))
+        if mem_block:
+            system += "\n\n" + mem_block
+        skill_block = self.skills.inject()
+        if skill_block:
+            system += "\n\n" + skill_block
+        return system
+
+    def refresh_system(self) -> None:
+        """Re-read memory + skills into the system prompt."""
+        self.ctx.system_prompt = self._system_prompt()
+
+    # ---- memory files ----
+
+    def memory_show(self) -> str:
+        """Both memory files, for /memory show."""
+        out = []
+        for name, title in (("memory.md", "PERSISTENT MEMORY"),
+                            ("user.md", "USER PROFILE")):
+            body = self.memory.read(name).strip()
+            out.append(f"{name} ({len(body)} chars)\n{body or '(empty)'}")
+        return "\n\n".join(out)
+
+    def memory_export(self, path: str) -> str:
+        return self.memory.export(path)
+
+    def memory_import(self, path: str) -> dict:
+        rep = self.memory.import_(path)
+        self.refresh_system()
+        return rep
+
+    # ---- skills ----
+
+    def skills_list(self) -> list[dict]:
+        return self.skills.all()
+
+    def skills_show(self, name: str) -> str:
+        s = self.skills.get(name)
+        if not s:
+            raise ValueError(f"no skill '{name}' — /skills lists them")
+        return f"{s['name']} — {s['description']}\n\n{s['body']}"
+
+    def skills_install(self, src: str) -> dict:
+        rep = self.skills.install(src)
+        self.refresh_system()
+        return rep
+
+    def skills_remove(self, name: str) -> bool:
+        ok = self.skills.remove(name)
+        if ok:
+            self.refresh_system()
+        return ok
+
+    def skill_load(self, name: str) -> str:
+        """Drop a skill body into the live context (the /skill command)."""
+        s = self.skills.get(name)
+        if not s:
+            raise ValueError(f"no skill '{name}' — /skills lists them")
+        self.ctx.add_user(f"[loaded skill: {s['name']}]\n{s['body']}")
+        return s["body"]
